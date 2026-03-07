@@ -7,8 +7,10 @@ import { Checkbox } from '../components/ui/checkbox';
 import { Label } from '../components/ui/label';
 import { Badge } from '../components/ui/badge';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
-import { useNavigate } from 'react-router';
+import { useNavigate, useParams } from 'react-router';
 import { toast } from 'sonner';
+import { getDocumentById } from '../services/documents';
+import { reviewPriorityBadgeClass, reviewPriorityLabelLong } from '../utils/reviewPresentation';
 
 const suggestedQuestions = [
   'Can you explain the methodology you used in section 3?',
@@ -19,8 +21,12 @@ const suggestedQuestions = [
   'What primary sources did you consult for this topic?',
 ];
 
+
 export function ReviewNotes() {
+  const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const document = id ? getDocumentById(id) : null;
+
   const [checklist, setChecklist] = useState({
     referencesChecked: false,
     oralDefenseRequired: false,
@@ -34,6 +40,40 @@ export function ReviewNotes() {
     toast.success('Review notes saved successfully');
     setTimeout(() => navigate('/'), 1500);
   };
+
+  // Graceful handling for missing/invalid ids.
+  if (!id || !document) {
+    return (
+      <div className="max-w-5xl mx-auto space-y-6">
+        <div>
+          <h2 className="text-slate-900 mb-1">Review Notes & Workflow</h2>
+          <p className="text-sm text-slate-600">
+            Document your review process and final decision
+          </p>
+        </div>
+
+        <Card className="border-slate-200">
+          <CardHeader className="border-b border-slate-200 pb-4">
+            <CardTitle className="text-slate-900">Document Not Found</CardTitle>
+          </CardHeader>
+          <CardContent className="pt-6 space-y-4">
+            <p className="text-sm text-slate-600">
+              We couldn’t find the document for that review notes link. It may have been deleted or the URL is invalid.
+            </p>
+            <Button
+              variant="outline"
+              className="text-slate-700 hover:text-slate-900"
+              onClick={() => navigate('/')}
+            >
+              Back to Dashboard
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  const courseShort = document.course.split(' - ')[0] || document.course;
 
   return (
     <div className="max-w-5xl mx-auto space-y-6">
@@ -53,12 +93,12 @@ export function ReviewNotes() {
               <div className="flex items-start justify-between">
                 <div>
                   <CardTitle className="text-slate-900 mb-1">
-                    The Impact of Machine Learning on Modern Healthcare Systems
+                    {document.title}
                   </CardTitle>
-                  <p className="text-sm text-slate-600">Emma Richardson • CSCI 4950</p>
+                  <p className="text-sm text-slate-600">{document.studentName} • {courseShort}</p>
                 </div>
-                <Badge variant="outline" className="bg-red-100 text-red-800 border-red-200">
-                  High Priority
+                <Badge variant="outline" className={reviewPriorityBadgeClass[document.reviewPriority]}>
+                  {reviewPriorityLabelLong[document.reviewPriority]}
                 </Badge>
               </div>
             </CardHeader>

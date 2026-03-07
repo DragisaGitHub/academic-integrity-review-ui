@@ -3,7 +3,6 @@ import {
   LayoutDashboard, 
   Upload, 
   FileText, 
-  ClipboardList,
   History, 
   Settings,
   Bell,
@@ -16,7 +15,6 @@ const navigation = [
   { name: 'Dashboard', href: '/', icon: LayoutDashboard },
   { name: 'Upload Document', href: '/upload', icon: Upload },
   { name: 'Analyses', href: '/analyses', icon: FileText },
-  { name: 'Review Notes', href: '/review-notes/1', icon: ClipboardList },
   { name: 'History', href: '/history', icon: History },
   { name: 'Settings', href: '/settings', icon: Settings },
 ];

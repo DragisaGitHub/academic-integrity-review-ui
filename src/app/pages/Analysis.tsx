@@ -17,8 +17,9 @@ import { Badge } from '../components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
 import { Textarea } from '../components/ui/textarea';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '../components/ui/dialog';
-import { mockAnalysis } from '../data/mockData';
 import type { Finding, FindingCategory, FindingSeverity } from '../types';
+import { getAnalysisById } from '../services/documents';
+import { reviewPriorityBadgeClass, reviewPriorityLabelAnalysis } from '../utils/reviewPresentation';
 
 const categoryIcons: Record<FindingCategory, any> = {
   citation: BookOpen,
@@ -51,12 +52,40 @@ const severityLabels: Record<FindingSeverity, string> = {
 };
 
 export function Analysis() {
-  const { id } = useParams();
+  const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [selectedFinding, setSelectedFinding] = useState<Finding | null>(null);
   const [highlightedParagraph, setHighlightedParagraph] = useState<number | null>(null);
 
-  const analysis = mockAnalysis;
+  const analysis = id ? getAnalysisById(id) : null;
+
+  // Graceful handling for missing/invalid ids.
+  if (!id || !analysis) {
+    return (
+      <div className="max-w-[1800px] mx-auto">
+        <Button
+          variant="ghost"
+          className="mb-4 text-slate-700 hover:text-slate-900"
+          onClick={() => navigate('/')}
+        >
+          <ArrowLeft className="h-4 w-4 mr-2" />
+          Back to Dashboard
+        </Button>
+
+        <Card className="border-slate-200">
+          <CardHeader className="border-b border-slate-200 pb-4">
+            <CardTitle className="text-slate-900">Analysis Not Found</CardTitle>
+          </CardHeader>
+          <CardContent className="pt-6">
+            <p className="text-sm text-slate-600">
+              We couldn’t find an analysis for that document. It may have been deleted or the link is invalid.
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
   const paragraphs = analysis.fullText.split('\n\n');
 
   const getFindingsForParagraph = (index: number) => {
@@ -146,16 +175,9 @@ export function Analysis() {
             </Button>
             <Badge 
               variant="outline" 
-              className={
-                analysis.reviewPriority === 'high' 
-                  ? 'bg-red-100 text-red-800 border-red-200' 
-                  : analysis.reviewPriority === 'medium'
-                  ? 'bg-amber-100 text-amber-800 border-amber-200'
-                  : 'bg-green-100 text-green-800 border-green-200'
-              }
+              className={reviewPriorityBadgeClass[analysis.reviewPriority]}
             >
-              {analysis.reviewPriority === 'high' ? 'High Review Priority' : 
-               analysis.reviewPriority === 'medium' ? 'Needs Manual Review' : 'Low Concern'}
+              {reviewPriorityLabelAnalysis[analysis.reviewPriority]}
             </Badge>
           </div>
         </div>

@@ -5,38 +5,22 @@ import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
-import { mockKPIData, mockDocuments, mockPriorityDistribution } from '../data/mockData';
 import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip } from 'recharts';
 import { Link } from 'react-router';
-import type { ReviewPriority, ReviewStatus } from '../types';
-
-const priorityColors: Record<ReviewPriority, string> = {
-  low: 'bg-green-100 text-green-800 border-green-200',
-  medium: 'bg-amber-100 text-amber-800 border-amber-200',
-  high: 'bg-red-100 text-red-800 border-red-200',
-};
-
-const statusColors: Record<ReviewStatus, string> = {
-  pending: 'bg-slate-100 text-slate-700 border-slate-200',
-  'in-review': 'bg-blue-100 text-blue-700 border-blue-200',
-  reviewed: 'bg-green-100 text-green-700 border-green-200',
-  flagged: 'bg-red-100 text-red-700 border-red-200',
-};
-
-const priorityLabels: Record<ReviewPriority, string> = {
-  low: 'Low Concern',
-  medium: 'Needs Review',
-  high: 'High Priority',
-};
-
-const statusLabels: Record<ReviewStatus, string> = {
-  pending: 'Pending',
-  'in-review': 'In Review',
-  reviewed: 'Reviewed',
-  flagged: 'Flagged',
-};
+import type { PriorityDistributionItem } from '../services/kpis';
+import { getKpis, getPriorityDistribution } from '../services/kpis';
+import { listDocuments } from '../services/documents';
+import { reviewPriorityBadgeClass, reviewPriorityLabelLong, reviewStatusBadgeClass, reviewStatusLabel } from '../utils/reviewPresentation';
 
 export function Dashboard() {
+  const kpis = getKpis();
+  const documents = listDocuments();
+  const priorityDistribution: PriorityDistributionItem[] = getPriorityDistribution();
+
+  // Preserve current behavior (the UI always had data). If something goes wrong,
+  // don't partially render a different state.
+  if (!kpis) return null;
+
   return (
     <div className="max-w-[1600px] mx-auto space-y-8">
       {/* Welcome Section */}
@@ -48,7 +32,7 @@ export function Dashboard() {
       <div className="grid grid-cols-4 gap-6">
         <KPICard
           title="Total Documents Reviewed"
-          value={mockKPIData.totalReviewed}
+          value={kpis.totalReviewed}
           icon={FileCheck}
           colorClass="text-slate-700"
           trend="+12 this month"
@@ -56,20 +40,20 @@ export function Dashboard() {
         />
         <KPICard
           title="Pending Manual Review"
-          value={mockKPIData.pendingReview}
+          value={kpis.pendingReview}
           icon={Clock}
           colorClass="text-blue-600"
         />
         <KPICard
           title="High Review Priority"
-          value={mockKPIData.highPriority}
+          value={kpis.highPriority}
           icon={AlertCircle}
           colorClass="text-red-600"
           trend="Requires attention"
         />
         <KPICard
           title="Verified / Low Concern"
-          value={mockKPIData.verified}
+          value={kpis.verified}
           icon={CheckCircle}
           colorClass="text-green-600"
           trend="74% of total"
@@ -119,7 +103,7 @@ export function Dashboard() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {mockDocuments.map((doc) => (
+                  {documents.map((doc) => (
                     <TableRow key={doc.id} className="border-slate-200">
                       <TableCell>
                         <div className="max-w-xs">
@@ -135,13 +119,13 @@ export function Dashboard() {
                         })}
                       </TableCell>
                       <TableCell>
-                        <Badge variant="outline" className={priorityColors[doc.reviewPriority]}>
-                          {priorityLabels[doc.reviewPriority]}
+                        <Badge variant="outline" className={reviewPriorityBadgeClass[doc.reviewPriority]}>
+                          {reviewPriorityLabelLong[doc.reviewPriority]}
                         </Badge>
                       </TableCell>
                       <TableCell>
-                        <Badge variant="outline" className={statusColors[doc.status]}>
-                          {statusLabels[doc.status]}
+                        <Badge variant="outline" className={reviewStatusBadgeClass[doc.status]}>
+                          {reviewStatusLabel[doc.status]}
                         </Badge>
                       </TableCell>
                       <TableCell className="text-right">
@@ -169,7 +153,7 @@ export function Dashboard() {
               <ResponsiveContainer width="100%" height={240}>
                 <PieChart>
                   <Pie
-                    data={mockPriorityDistribution}
+                    data={priorityDistribution}
                     cx="50%"
                     cy="50%"
                     innerRadius={60}
@@ -177,7 +161,7 @@ export function Dashboard() {
                     paddingAngle={2}
                     dataKey="value"
                   >
-                    {mockPriorityDistribution.map((entry, index) => (
+                    {priorityDistribution.map((entry, index) => (
                       <Cell key={`cell-${index}`} fill={entry.color} />
                     ))}
                   </Pie>

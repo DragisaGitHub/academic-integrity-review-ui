@@ -1,55 +1,30 @@
 import { useState } from 'react';
-import { Filter, Download, Trash2, Eye, Edit3 } from 'lucide-react';
+import { Download, Trash2, Eye, Edit3 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
 import { Input } from '../components/ui/input';
-import { mockDocuments } from '../data/mockData';
 import { Link } from 'react-router';
-import type { ReviewPriority, ReviewStatus, FinalDecision } from '../types';
+import type { FinalDecision } from '../types';
+import { listDocuments } from '../services/documents';
+import { reviewPriorityBadgeClass, reviewPriorityLabelShort, reviewStatusBadgeClass, reviewStatusLabel } from '../utils/reviewPresentation';
 
-const priorityColors: Record<ReviewPriority, string> = {
-  low: 'bg-green-100 text-green-800 border-green-200',
-  medium: 'bg-amber-100 text-amber-800 border-amber-200',
-  high: 'bg-red-100 text-red-800 border-red-200',
-};
-
-const statusColors: Record<ReviewStatus, string> = {
-  pending: 'bg-slate-100 text-slate-700 border-slate-200',
-  'in-review': 'bg-blue-100 text-blue-700 border-blue-200',
-  reviewed: 'bg-green-100 text-green-700 border-green-200',
-  flagged: 'bg-red-100 text-red-700 border-red-200',
-};
-
-const decisionColors: Record<FinalDecision, string> = {
+const decisionColors: Record<string, string> = {
   accept: 'bg-green-100 text-green-800 border-green-200',
   'accept-with-revisions': 'bg-blue-100 text-blue-800 border-blue-200',
   'request-clarification': 'bg-amber-100 text-amber-800 border-amber-200',
   escalate: 'bg-red-100 text-red-800 border-red-200',
-  null: 'bg-slate-100 text-slate-600 border-slate-200',
+  none: 'bg-slate-100 text-slate-600 border-slate-200',
 };
 
-const priorityLabels: Record<ReviewPriority, string> = {
-  low: 'Low',
-  medium: 'Medium',
-  high: 'High',
-};
-
-const statusLabels: Record<ReviewStatus, string> = {
-  pending: 'Pending',
-  'in-review': 'In Review',
-  reviewed: 'Reviewed',
-  flagged: 'Flagged',
-};
-
-const decisionLabels: Record<FinalDecision, string> = {
+const decisionLabels: Record<string, string> = {
   accept: 'Accept',
   'accept-with-revisions': 'Accept w/ Revisions',
   'request-clarification': 'Needs Clarification',
   escalate: 'Escalated',
-  null: 'Not Decided',
+  none: 'Not Decided',
 };
 
 export function History() {
@@ -58,10 +33,12 @@ export function History() {
   const [priorityFilter, setPriorityFilter] = useState('all');
   const [statusFilter, setStatusFilter] = useState('all');
 
+  const baseDocuments = listDocuments();
+
   // Expand mock data with more entries
   const allDocuments = [
-    ...mockDocuments,
-    ...mockDocuments.map((doc, i) => ({
+    ...baseDocuments,
+    ...baseDocuments.map((doc, i) => ({
       ...doc,
       id: `${doc.id}-${i}`,
       submissionDate: new Date(Date.now() - i * 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
@@ -69,12 +46,14 @@ export function History() {
   ];
 
   const filteredDocuments = allDocuments.filter(doc => {
-    const matchesSearch = 
-      doc.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      doc.studentName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      doc.course.toLowerCase().includes(searchQuery.toLowerCase());
-    
-    const matchesCourse = courseFilter === 'all' || doc.course.includes(courseFilter);
+    const query = searchQuery.toLowerCase();
+
+    const matchesSearch =
+      doc.title.toLowerCase().indexOf(query) !== -1 ||
+      doc.studentName.toLowerCase().indexOf(query) !== -1 ||
+      doc.course.toLowerCase().indexOf(query) !== -1;
+
+    const matchesCourse = courseFilter === 'all' || doc.course.indexOf(courseFilter) !== -1;
     const matchesPriority = priorityFilter === 'all' || doc.reviewPriority === priorityFilter;
     const matchesStatus = statusFilter === 'all' || doc.status === statusFilter;
 
@@ -195,19 +174,24 @@ export function History() {
                     })}
                   </TableCell>
                   <TableCell>
-                    <Badge variant="outline" className={priorityColors[doc.reviewPriority]}>
-                      {priorityLabels[doc.reviewPriority]}
+                    <Badge variant="outline" className={reviewPriorityBadgeClass[doc.reviewPriority]}>
+                      {reviewPriorityLabelShort[doc.reviewPriority]}
                     </Badge>
                   </TableCell>
                   <TableCell>
-                    <Badge variant="outline" className={statusColors[doc.status]}>
-                      {statusLabels[doc.status]}
+                    <Badge variant="outline" className={reviewStatusBadgeClass[doc.status]}>
+                      {reviewStatusLabel[doc.status]}
                     </Badge>
                   </TableCell>
                   <TableCell>
-                    <Badge variant="outline" className={decisionColors[doc.finalDecision || null]}>
-                      {decisionLabels[doc.finalDecision || null]}
-                    </Badge>
+                    {(() => {
+                      const decisionKey = (doc.finalDecision ?? 'none') as FinalDecision | 'none';
+                      return (
+                        <Badge variant="outline" className={decisionColors[decisionKey]}>
+                          {decisionLabels[decisionKey]}
+                        </Badge>
+                      );
+                    })()}
                   </TableCell>
                   <TableCell className="text-right">
                     <div className="flex items-center justify-end gap-1">
