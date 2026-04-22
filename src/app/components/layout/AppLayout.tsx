@@ -5,11 +5,10 @@ import {
   FileText, 
   History, 
   Settings,
-  Bell,
   Search,
 } from 'lucide-react';
 import { Input } from '../ui/input';
-import { Button } from '../ui/button';
+import { NotificationBell } from './NotificationBell';
 
 const navigation = [
   { name: 'Dashboard', href: '/', icon: LayoutDashboard },
@@ -23,30 +22,27 @@ export function AppLayout() {
   const location = useLocation();
 
   return (
-    <div className="min-h-screen bg-slate-50">
+    <div className="min-h-screen bg-background text-foreground">
       {/* Top Navigation Bar */}
-      <header className="bg-white border-b border-slate-200 sticky top-0 z-10">
+      <header className="bg-card border-b border-border sticky top-0 z-10">
         <div className="px-6 py-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-8">
               <div>
-                <h1 className="text-slate-900 tracking-tight">Academic Integrity Review</h1>
-                <p className="text-sm text-slate-600 mt-0.5">Document Analysis Assistant</p>
+                <h1 className="tracking-tight">Academic Integrity Review</h1>
+                <p className="text-sm text-muted-foreground mt-0.5">Document Analysis Assistant</p>
               </div>
             </div>
 
             <div className="flex items-center gap-4">
               <div className="relative w-80">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                 <Input 
                   placeholder="Search documents, students, or courses..." 
-                  className="pl-9 bg-slate-50 border-slate-200"
+                  className="pl-9"
                 />
               </div>
-              <Button variant="ghost" size="icon" className="relative">
-                <Bell className="h-5 w-5 text-slate-600" />
-                <span className="absolute top-1.5 right-1.5 h-2 w-2 bg-blue-600 rounded-full" />
-              </Button>
+              <NotificationBell />
             </div>
           </div>
         </div>
@@ -54,7 +50,7 @@ export function AppLayout() {
 
       <div className="flex">
         {/* Sidebar */}
-        <aside className="w-64 bg-white border-r border-slate-200 min-h-[calc(100vh-73px)] sticky top-[73px]">
+        <aside className="w-64 bg-card border-r border-border min-h-[calc(100vh-73px)] sticky top-[73px]">
           <nav className="p-4 space-y-1">
             {navigation.map((item) => {
               const isActive = location.pathname === item.href;
@@ -64,8 +60,8 @@ export function AppLayout() {
                   to={item.href}
                   className={`flex items-center gap-3 px-4 py-2.5 rounded-lg transition-colors ${
                     isActive
-                      ? 'bg-slate-900 text-white'
-                      : 'text-slate-700 hover:bg-slate-100'
+                      ? 'bg-primary text-primary-foreground'
+                      : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'
                   }`}
                 >
                   <item.icon className="h-5 w-5" />
@@ -76,8 +72,8 @@ export function AppLayout() {
           </nav>
 
           <div className="p-4 mt-8">
-            <div className="bg-slate-50 border border-slate-200 rounded-lg p-4">
-              <p className="text-xs text-slate-600 leading-relaxed">
+            <div className="bg-muted border border-border rounded-lg p-4">
+              <p className="text-xs text-muted-foreground leading-relaxed">
                 All document analysis is performed locally. No student papers are sent to external cloud services.
               </p>
             </div>

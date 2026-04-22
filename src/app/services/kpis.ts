@@ -1,7 +1,4 @@
-import type { KPIData } from '../types';
-import { mockKPIData, mockPriorityDistribution } from '../data/mockData';
-import { apiEndpoints } from '../api/endpoints';
-import { getJson } from '../api/http';
+import type { Document, KPIData, ReviewStatus } from '../types';
 
 export type PriorityDistributionItem = {
   name: string;
@@ -9,38 +6,35 @@ export type PriorityDistributionItem = {
   color: string;
 };
 
-/**
- * Mock-backed KPI service.
- *
- * Later, replace implementations here with API calls (e.g. GET /dashboard/kpis).
- */
-export function getKpis(): KPIData {
-  return mockKPIData;
+function isPendingStatus(status: ReviewStatus): boolean {
+  return status === 'pending' || status === 'in-review' || status === 'flagged';
 }
 
-/**
- * Mock-backed chart data for the dashboard.
- */
-export function getPriorityDistribution(): PriorityDistributionItem[] {
-  return mockPriorityDistribution;
+export function buildKpisFromDocuments(documents: Document[]): KPIData {
+  const totalReviewed = documents.filter((d) => d.status === 'reviewed').length;
+  const pendingReview = documents.filter((d) => isPendingStatus(d.status)).length;
+  const highPriority = documents.filter((d) => d.reviewPriority === 'high' && d.status !== 'reviewed').length;
+
+  // Backend is the source of truth for document states; "verified" is derived from reviewed.
+  const verified = totalReviewed;
+
+  return {
+    totalReviewed,
+    pendingReview,
+    highPriority,
+    verified,
+  };
 }
 
-/**
- * Async API-backed variant of {@link getKpis}.
- *
- * Not used by pages yet; safe to add for incremental backend adoption.
- */
-export async function getKpisAsync(init?: Omit<RequestInit, 'method'>): Promise<KPIData> {
-  return getJson<KPIData>(apiEndpoints.dashboardKpis, init);
-}
+export function buildPriorityDistributionFromDocuments(documents: Document[]): PriorityDistributionItem[] {
+  const low = documents.filter((d) => d.reviewPriority === 'low').length;
+  const medium = documents.filter((d) => d.reviewPriority === 'medium').length;
+  const high = documents.filter((d) => d.reviewPriority === 'high').length;
 
-/**
- * Async API-backed variant of {@link getPriorityDistribution}.
- *
- * Endpoint naming is intentionally simple and can be adjusted once backend routes are finalized.
- */
-export async function getPriorityDistributionAsync(
-  init?: Omit<RequestInit, 'method'>,
-): Promise<PriorityDistributionItem[]> {
-  return getJson<PriorityDistributionItem[]>(`${apiEndpoints.dashboardKpis}/priority-distribution`, init);
+  // Use existing theme tokens (no new hard-coded colors).
+  return [
+    { name: 'Low Concern', value: low, color: 'var(--chart-2)' },
+    { name: 'Needs Review', value: medium, color: 'var(--chart-4)' },
+    { name: 'High Priority', value: high, color: 'var(--destructive)' },
+  ];
 }

@@ -1,4 +1,5 @@
-import { FileCheck, AlertCircle, CheckCircle, Clock, Plus, Filter } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { FileCheck, AlertCircle, CheckCircle, Clock, Plus, Filter, Loader2 } from 'lucide-react';
 import { KPICard } from '../components/dashboard/KPICard';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Button } from '../components/ui/button';
@@ -7,19 +8,86 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
 import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip } from 'recharts';
 import { Link } from 'react-router';
-import type { PriorityDistributionItem } from '../services/kpis';
-import { getKpis, getPriorityDistribution } from '../services/kpis';
-import { listDocuments } from '../services/documents';
-import { reviewPriorityBadgeClass, reviewPriorityLabelLong, reviewStatusBadgeClass, reviewStatusLabel } from '../utils/reviewPresentation';
+import { toast } from 'sonner';
+import { buildKpisFromDocuments, buildPriorityDistributionFromDocuments } from '../services/kpis';
+import type { Document } from '../types';
+import { listDocumentsFromApi } from '../services/documents';
+import { formatDateOrDash } from '../utils/dateFormat';
+import {
+  analysisStatusBadgeClass,
+  analysisStatusLabel,
+  reviewPriorityBadgeClass,
+  reviewPriorityLabelLong,
+  reviewStatusBadgeClass,
+  reviewStatusLabel,
+} from '../utils/reviewPresentation';
+
+function normalizeCourse(value: string): string {
+  return value.trim().toLowerCase();
+}
 
 export function Dashboard() {
-  const kpis = getKpis();
-  const documents = listDocuments();
-  const priorityDistribution: PriorityDistributionItem[] = getPriorityDistribution();
+  const [documents, setDocuments] = useState<Document[]>([]);
+  const [courseFilter, setCourseFilter] = useState('all');
 
-  // Preserve current behavior (the UI always had data). If something goes wrong,
-  // don't partially render a different state.
-  if (!kpis) return null;
+  const kpis = useMemo(() => buildKpisFromDocuments(documents), [documents]);
+  const priorityDistribution = useMemo(() => buildPriorityDistributionFromDocuments(documents), [documents]);
+
+  const totalDocuments = documents.length;
+  const averagePerWeek = useMemo(() => {
+    if (documents.length === 0) return 0;
+
+    const timestamps = documents
+      .map((d) => (d.submissionDate ? Date.parse(d.submissionDate) : Number.NaN))
+      .filter((ts) => !Number.isNaN(ts))
+      .sort((a, b) => a - b);
+
+    if (timestamps.length < 2) return timestamps.length;
+
+    const first = timestamps[0];
+    const last = timestamps[timestamps.length - 1];
+    const diffMs = Math.max(0, last - first);
+    const weeks = Math.max(1, diffMs / (7 * 24 * 60 * 60 * 1000));
+    return Math.round((timestamps.length / weeks) * 10) / 10;
+  }, [documents]);
+
+  const courseOptions = useMemo(() => {
+    const map = new Map<string, string>();
+
+    for (const doc of documents) {
+      const course = doc.course.trim();
+      if (!course) continue;
+      const key = normalizeCourse(course);
+      if (!map.has(key)) map.set(key, course);
+    }
+
+    return Array.from(map.entries())
+      .map(([value, label]) => ({ value, label }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [documents]);
+
+  const filteredDocuments = useMemo(() => {
+    if (courseFilter === 'all') return documents;
+    return documents.filter((d) => normalizeCourse(d.course) === courseFilter);
+  }, [documents, courseFilter]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void listDocumentsFromApi()
+      .then((docs) => {
+        if (cancelled) return;
+        setDocuments(docs);
+      })
+      .catch((err: unknown) => {
+        console.warn('Failed to load documents from backend API', err);
+        toast.error('Could not reach the backend API. Please try again.');
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   return (
     <div className="max-w-[1600px] mx-auto space-y-8">
@@ -68,16 +136,18 @@ export function Dashboard() {
               <div className="flex items-center justify-between">
                 <CardTitle className="text-slate-900">Recent Analyses</CardTitle>
                 <div className="flex items-center gap-2">
-                  <Select defaultValue="all">
+                  <Select value={courseFilter} onValueChange={setCourseFilter}>
                     <SelectTrigger className="w-40 h-9 text-sm">
                       <Filter className="h-4 w-4 mr-2" />
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="all">All Courses</SelectItem>
-                      <SelectItem value="csci">Computer Science</SelectItem>
-                      <SelectItem value="pols">Political Science</SelectItem>
-                      <SelectItem value="biol">Biology</SelectItem>
+                      {courseOptions.map((course) => (
+                        <SelectItem key={course.value} value={course.value}>
+                          {course.label}
+                        </SelectItem>
+                      ))}
                     </SelectContent>
                   </Select>
                   <Link to="/upload">
@@ -103,7 +173,7 @@ export function Dashboard() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {documents.map((doc) => (
+                  {filteredDocuments.map((doc) => (
                     <TableRow key={doc.id} className="border-slate-200">
                       <TableCell>
                         <div className="max-w-xs">
@@ -113,9 +183,9 @@ export function Dashboard() {
                       <TableCell className="text-sm text-slate-700">{doc.studentName}</TableCell>
                       <TableCell className="text-xs text-slate-600">{doc.course}</TableCell>
                       <TableCell className="text-xs text-slate-600">
-                        {new Date(doc.submissionDate).toLocaleDateString('en-US', { 
-                          month: 'short', 
-                          day: 'numeric' 
+                        {formatDateOrDash(doc.submissionDate, {
+                          month: 'short',
+                          day: 'numeric',
                         })}
                       </TableCell>
                       <TableCell>
@@ -124,9 +194,25 @@ export function Dashboard() {
                         </Badge>
                       </TableCell>
                       <TableCell>
-                        <Badge variant="outline" className={reviewStatusBadgeClass[doc.status]}>
-                          {reviewStatusLabel[doc.status]}
-                        </Badge>
+                        {doc.analysisStatus && doc.analysisStatus !== 'completed' ? (
+                          <div className="space-y-1">
+                            <Badge variant="outline" className={analysisStatusBadgeClass[doc.analysisStatus]}>
+                              {doc.analysisStatus === 'pending' || doc.analysisStatus === 'extracting' || doc.analysisStatus === 'analyzing' ? (
+                                <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                              ) : null}
+                              {analysisStatusLabel[doc.analysisStatus]}
+                            </Badge>
+                            {doc.analysisStatus === 'failed' && doc.analysisErrorMessage ? (
+                              <p className="text-xs text-red-600 max-w-[180px] truncate" title={doc.analysisErrorMessage}>
+                                {doc.analysisErrorMessage}
+                              </p>
+                            ) : null}
+                          </div>
+                        ) : (
+                          <Badge variant="outline" className={reviewStatusBadgeClass[doc.status]}>
+                            {reviewStatusLabel[doc.status]}
+                          </Badge>
+                        )}
                       </TableCell>
                       <TableCell className="text-right">
                         <Link to={`/analysis/${doc.id}`}>
@@ -178,11 +264,11 @@ export function Dashboard() {
               <div className="mt-6 space-y-3">
                 <div className="flex items-center justify-between text-sm">
                   <span className="text-slate-600">Total Documents</span>
-                  <span className="text-slate-900">127</span>
+                  <span className="text-slate-900">{totalDocuments}</span>
                 </div>
                 <div className="flex items-center justify-between text-sm">
                   <span className="text-slate-600">Average per Week</span>
-                  <span className="text-slate-900">8.4</span>
+                  <span className="text-slate-900">{averagePerWeek}</span>
                 </div>
               </div>
             </CardContent>

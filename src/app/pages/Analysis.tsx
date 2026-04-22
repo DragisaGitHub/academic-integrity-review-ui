@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router';
 import { 
   ArrowLeft, 
@@ -7,6 +7,7 @@ import {
   BookOpen,
   CheckCircle,
   Flag,
+  Loader2,
   MessageSquare,
   ExternalLink,
   ClipboardList,
@@ -17,8 +18,18 @@ import { Badge } from '../components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
 import { Textarea } from '../components/ui/textarea';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '../components/ui/dialog';
-import type { Finding, FindingCategory, FindingSeverity } from '../types';
-import { getAnalysisById } from '../services/documents';
+import { toast } from 'sonner';
+import type { Document, DocumentAnalysis, Finding, FindingCategory, FindingSeverity } from '../types';
+import { getDocumentByIdFromApi } from '../services/documents';
+import {
+  computeSummaryFromFindings,
+  getAnalysisStatusFromApi,
+  getAnalysisByDocumentIdFromApi,
+  getFindingsByAnalysisIdFromApi,
+  retryAnalysisFromApi,
+  updateFindingForAnalysisFromApi,
+} from '../services/analyses';
+import { formatDateOrDash } from '../utils/dateFormat';
 import { reviewPriorityBadgeClass, reviewPriorityLabelAnalysis } from '../utils/reviewPresentation';
 
 const categoryIcons: Record<FindingCategory, any> = {
@@ -51,16 +62,469 @@ const severityLabels: Record<FindingSeverity, string> = {
   critical: 'Critical',
 };
 
+function formatParagraphLocation(location: number): string {
+  return location >= 0 ? String(location) : 'N/A';
+}
+
+function wait(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'));
+      return;
+    }
+
+    const timeoutId = window.setTimeout(resolve, ms);
+
+    if (signal) {
+      const onAbort = () => {
+        window.clearTimeout(timeoutId);
+        reject(new DOMException('Aborted', 'AbortError'));
+      };
+
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+  });
+}
+
 export function Analysis() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [selectedFinding, setSelectedFinding] = useState<Finding | null>(null);
   const [highlightedParagraph, setHighlightedParagraph] = useState<number | null>(null);
 
-  const analysis = id ? getAnalysisById(id) : null;
+  const [document, setDocument] = useState<Document | null>(null);
+  const [analysis, setAnalysis] = useState<DocumentAnalysis | null>(null);
+  const [analysisErrorMessage, setAnalysisErrorMessage] = useState<string>('');
+  const [analysisIdOverride, setAnalysisIdOverride] = useState<string | null>(null);
+  const [retryTrigger, setRetryTrigger] = useState(0);
+  const [isRetrying, setIsRetrying] = useState(false);
+  const [notesDraft, setNotesDraft] = useState('');
+  const [isSavingNotes, setIsSavingNotes] = useState(false);
+  const [isUpdatingReviewState, setIsUpdatingReviewState] = useState(false);
+  const [isUpdatingFollowUpState, setIsUpdatingFollowUpState] = useState(false);
+  const [loadState, setLoadState] = useState<'loading' | 'loaded' | 'not-found' | 'error' | 'analysis-pending' | 'analysis-failed'>('loading');
+  const retryPendingRef = useRef(false);
+
+  function applyUpdatedFinding(updatedFinding: Finding): void {
+    setAnalysis((previous) => {
+      if (!previous) return previous;
+
+      return {
+        ...previous,
+        findings: previous.findings.map((finding) =>
+          finding.id === updatedFinding.id ? { ...finding, ...updatedFinding } : finding,
+        ),
+      };
+    });
+    setSelectedFinding((previous) =>
+      previous && previous.id === updatedFinding.id ? { ...previous, ...updatedFinding } : previous,
+    );
+    setNotesDraft(updatedFinding.professorNotes ?? '');
+  }
+
+  async function patchSelectedFinding(updates: {
+    professorNotes?: string;
+    reviewed?: boolean;
+    flaggedForFollowUp?: boolean;
+  }): Promise<Finding | null> {
+    if (!analysis?.analysisId || !selectedFinding) {
+      toast.error('Finding details are not available yet.');
+      return null;
+    }
+
+    try {
+      const updatedFinding = await updateFindingForAnalysisFromApi({
+        analysisId: analysis.analysisId,
+        documentId: analysis.id,
+        findingId: selectedFinding.id,
+        updates,
+      });
+
+      applyUpdatedFinding(updatedFinding);
+      return updatedFinding;
+    } catch (error) {
+      console.error('Failed to update finding', error);
+      toast.error('Could not update this finding.');
+      return null;
+    }
+  }
+
+  async function handleNotesBlur(): Promise<void> {
+    if (!selectedFinding) return;
+
+    const nextNotes = notesDraft;
+    const currentNotes = selectedFinding.professorNotes ?? '';
+    if (nextNotes === currentNotes) return;
+
+    setIsSavingNotes(true);
+    try {
+      const updatedFinding = await patchSelectedFinding({ professorNotes: nextNotes });
+      if (updatedFinding) {
+        toast.success('Professor notes saved.');
+      }
+    } finally {
+      setIsSavingNotes(false);
+    }
+  }
+
+  async function handleMarkReviewed(): Promise<void> {
+    if (!selectedFinding || selectedFinding.reviewed) return;
+
+    setIsUpdatingReviewState(true);
+    try {
+      const updatedFinding = await patchSelectedFinding({ reviewed: true });
+      if (updatedFinding) {
+        toast.success('Finding marked as reviewed.');
+      }
+    } finally {
+      setIsUpdatingReviewState(false);
+    }
+  }
+
+  async function handleFlagForFollowUp(): Promise<void> {
+    if (!selectedFinding || selectedFinding.flaggedForFollowUp) return;
+
+    setIsUpdatingFollowUpState(true);
+    try {
+      const updatedFinding = await patchSelectedFinding({ flaggedForFollowUp: true });
+      if (updatedFinding) {
+        toast.success('Finding flagged for follow-up.');
+      }
+    } finally {
+      setIsUpdatingFollowUpState(false);
+    }
+  }
+
+  useEffect(() => {
+    setNotesDraft(selectedFinding?.professorNotes ?? '');
+  }, [selectedFinding]);
+
+  async function handleRetry(): Promise<void> {
+    if (!document?.analysisId) {
+      toast.error('No analysis is available to retry.');
+      return;
+    }
+
+    setIsRetrying(true);
+
+    try {
+      const retryResult = await retryAnalysisFromApi(document.analysisId);
+      retryPendingRef.current = true;
+      setAnalysisIdOverride(retryResult.analysisId ?? document.analysisId);
+      setAnalysisErrorMessage('');
+      setLoadState('analysis-pending');
+      setRetryTrigger((previous) => previous + 1);
+      toast.success('Retrying analysis…');
+    } catch (error) {
+      console.error('Failed to retry analysis', error);
+      toast.error('Failed to retry analysis.');
+    } finally {
+      setIsRetrying(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!id) {
+      setDocument(null);
+      setAnalysis(null);
+      setAnalysisErrorMessage('');
+      setLoadState('not-found');
+      return;
+    }
+
+    setLoadState('loading');
+    setDocument(null);
+    setAnalysis(null);
+    setAnalysisErrorMessage('');
+
+    let cancelled = false;
+    const abortController = new AbortController();
+
+    (async () => {
+      try {
+        const loadedDocument = await getDocumentByIdFromApi(id);
+        if (cancelled) return;
+
+        if (!loadedDocument) {
+          setDocument(null);
+          setAnalysis(null);
+          setLoadState('not-found');
+          return;
+        }
+
+        setDocument(loadedDocument);
+
+        const forcedPending = retryPendingRef.current;
+        retryPendingRef.current = false;
+        const activeAnalysisId = analysisIdOverride ?? loadedDocument.analysisId ?? null;
+        let currentStatus = forcedPending ? 'pending' : loadedDocument.analysisStatus;
+
+        if (currentStatus === 'failed') {
+          setAnalysis(null);
+          setAnalysisErrorMessage(loadedDocument.analysisErrorMessage ?? 'The analysis failed on the backend.');
+          setLoadState('analysis-failed');
+          return;
+        }
+
+        if ((currentStatus === 'pending' || currentStatus === 'extracting' || currentStatus === 'analyzing') && activeAnalysisId) {
+          setLoadState('analysis-pending');
+
+          while (!abortController.signal.aborted) {
+            const statusResult = await getAnalysisStatusFromApi(activeAnalysisId, abortController.signal);
+            currentStatus = statusResult.status;
+
+            if (currentStatus === 'failed') {
+              setAnalysis(null);
+              setAnalysisErrorMessage(statusResult.errorMessage ?? loadedDocument.analysisErrorMessage ?? 'The analysis failed on the backend.');
+              setLoadState('analysis-failed');
+              return;
+            }
+
+            if (currentStatus === 'completed') {
+              break;
+            }
+
+            await wait(3000, abortController.signal);
+          }
+        }
+
+        const analysisDetails = await getAnalysisByDocumentIdFromApi(id);
+        if (cancelled) return;
+
+        // Document exists but no analysis exists yet.
+        if (!analysisDetails) {
+          setAnalysis({
+            ...loadedDocument,
+            findings: [],
+            summary: {
+              missingCitations: 0,
+              suspiciousReferences: 0,
+              factualIssues: 0,
+              styleInconsistencies: 0,
+              unsupportedClaims: 0,
+            },
+            fullText: '',
+          });
+          setLoadState('loaded');
+          return;
+        }
+
+        const findings = await getFindingsByAnalysisIdFromApi(
+          {
+          analysisId: analysisDetails.id,
+          documentId: loadedDocument.id,
+          signal: abortController.signal,
+          },
+        );
+        if (cancelled) return;
+
+        setAnalysis({
+          ...loadedDocument,
+          analysisId: loadedDocument.analysisId ?? analysisDetails.id,
+          analysisDate: analysisDetails.analysisDate ?? loadedDocument.analysisDate,
+          summary: computeSummaryFromFindings(findings),
+          fullText: analysisDetails.fullText,
+          findings,
+        });
+        setAnalysisIdOverride(null);
+        setLoadState('loaded');
+      } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') {
+          return;
+        }
+
+        console.error('Failed to load analysis from backend', error);
+        setDocument(null);
+        setAnalysis(null);
+        setLoadState('error');
+        toast.error('Could not load analysis from the backend API.');
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      abortController.abort();
+    };
+  }, [analysisIdOverride, id, retryTrigger]);
+
+  const headerDocument = analysis ?? document;
+
+  if (!id) {
+    return (
+      <div className="max-w-[1800px] mx-auto">
+        <Button
+          variant="ghost"
+          className="mb-4 text-slate-700 hover:text-slate-900"
+          onClick={() => navigate('/')}
+        >
+          <ArrowLeft className="h-4 w-4 mr-2" />
+          Back to Dashboard
+        </Button>
+
+        <Card className="border-slate-200">
+          <CardHeader className="border-b border-slate-200 pb-4">
+            <CardTitle className="text-slate-900">Analysis Not Found</CardTitle>
+          </CardHeader>
+          <CardContent className="pt-6">
+            <p className="text-sm text-slate-600">
+              We couldn’t find an analysis for that document. It may have been deleted or the link is invalid.
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  if (loadState === 'loading') {
+    return (
+      <div className="max-w-[1800px] mx-auto">
+        <Button
+          variant="ghost"
+          className="mb-4 text-slate-700 hover:text-slate-900"
+          onClick={() => navigate('/')}
+        >
+          <ArrowLeft className="h-4 w-4 mr-2" />
+          Back to Dashboard
+        </Button>
+
+        <Card className="border-slate-200">
+          <CardHeader className="border-b border-slate-200 pb-4">
+            <CardTitle className="text-slate-900">Loading Analysis</CardTitle>
+          </CardHeader>
+          <CardContent className="pt-6">
+            <p className="text-sm text-slate-600">Fetching analysis details from the backend…</p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  if (loadState === 'error') {
+    return (
+      <div className="max-w-[1800px] mx-auto">
+        <Button
+          variant="ghost"
+          className="mb-4 text-slate-700 hover:text-slate-900"
+          onClick={() => navigate('/')}
+        >
+          <ArrowLeft className="h-4 w-4 mr-2" />
+          Back to Dashboard
+        </Button>
+
+        <Card className="border-slate-200">
+          <CardHeader className="border-b border-slate-200 pb-4">
+            <CardTitle className="text-slate-900">Could Not Load Analysis</CardTitle>
+          </CardHeader>
+          <CardContent className="pt-6">
+            <p className="text-sm text-slate-600">The backend API could not be reached.</p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  if (loadState === 'analysis-pending' && headerDocument) {
+    return (
+      <div className="max-w-[1800px] mx-auto">
+        <Button
+          variant="ghost"
+          className="mb-4 text-slate-700 hover:text-slate-900"
+          onClick={() => navigate('/')}
+        >
+          <ArrowLeft className="h-4 w-4 mr-2" />
+          Back to Dashboard
+        </Button>
+
+        <div className="flex items-start justify-between mb-6">
+          <div>
+            <h2 className="text-slate-900 mb-2">{headerDocument.title}</h2>
+            <div className="flex items-center gap-4 text-sm text-slate-600">
+              <span>{headerDocument.studentName}</span>
+              <span>•</span>
+              <span>{headerDocument.course}</span>
+              <span>•</span>
+              <span>Submitted {formatDateOrDash(headerDocument.submissionDate)}</span>
+            </div>
+          </div>
+          <Badge variant="outline" className={reviewPriorityBadgeClass[headerDocument.reviewPriority]}>
+            {reviewPriorityLabelAnalysis[headerDocument.reviewPriority]}
+          </Badge>
+        </div>
+
+        <Card className="border-slate-200">
+          <CardHeader className="border-b border-slate-200 pb-4">
+            <CardTitle className="text-slate-900 flex items-center gap-2">
+              <Loader2 className="h-5 w-5 animate-spin text-blue-600" />
+              Analysis in Progress
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="pt-6">
+            <p className="text-sm text-slate-600">
+              The document is being analyzed. This page will update automatically when the backend marks the analysis as completed.
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  if (loadState === 'analysis-failed' && headerDocument) {
+    return (
+      <div className="max-w-[1800px] mx-auto">
+        <Button
+          variant="ghost"
+          className="mb-4 text-slate-700 hover:text-slate-900"
+          onClick={() => navigate('/')}
+        >
+          <ArrowLeft className="h-4 w-4 mr-2" />
+          Back to Dashboard
+        </Button>
+
+        <div className="flex items-start justify-between mb-6">
+          <div>
+            <h2 className="text-slate-900 mb-2">{headerDocument.title}</h2>
+            <div className="flex items-center gap-4 text-sm text-slate-600">
+              <span>{headerDocument.studentName}</span>
+              <span>•</span>
+              <span>{headerDocument.course}</span>
+              <span>•</span>
+              <span>Submitted {formatDateOrDash(headerDocument.submissionDate)}</span>
+            </div>
+          </div>
+          <Badge variant="outline" className={reviewPriorityBadgeClass[headerDocument.reviewPriority]}>
+            {reviewPriorityLabelAnalysis[headerDocument.reviewPriority]}
+          </Badge>
+        </div>
+
+        <Card className="border-red-200 bg-red-50">
+          <CardHeader className="border-b border-red-200 pb-4">
+            <CardTitle className="text-red-900 flex items-center gap-2">
+              <AlertCircle className="h-5 w-5" />
+              Analysis Failed
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="pt-6 space-y-4">
+            <p className="text-sm text-red-800">
+              {analysisErrorMessage || 'The backend could not complete this analysis.'}
+            </p>
+            <Button onClick={() => void handleRetry()} disabled={isRetrying}>
+              {isRetrying ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  Retrying...
+                </>
+              ) : (
+                'Retry Analysis'
+              )}
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
 
   // Graceful handling for missing/invalid ids.
-  if (!id || !analysis) {
+  if (loadState === 'not-found' || !analysis) {
     return (
       <div className="max-w-[1800px] mx-auto">
         <Button
@@ -160,9 +624,9 @@ export function Analysis() {
               <span>•</span>
               <span>{analysis.course}</span>
               <span>•</span>
-              <span>Submitted {new Date(analysis.submissionDate).toLocaleDateString()}</span>
+              <span>Submitted {formatDateOrDash(analysis.submissionDate)}</span>
               <span>•</span>
-              <span>Analyzed {new Date(analysis.analysisDate).toLocaleDateString()}</span>
+              <span>Analyzed {formatDateOrDash(analysis.analysisDate)}</span>
             </div>
           </div>
           <div className="flex items-center gap-3">
@@ -323,17 +787,33 @@ export function Analysis() {
       </div>
 
       {/* Finding Detail Modal */}
-      <Dialog open={!!selectedFinding} onOpenChange={() => setSelectedFinding(null)}>
+      <Dialog open={!!selectedFinding} onOpenChange={(open) => {
+        if (!open) {
+          setSelectedFinding(null);
+        }
+      }}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
             <div className="flex items-start justify-between mb-2">
-              <DialogTitle className="text-slate-900">{selectedFinding?.title}</DialogTitle>
+              <div className="flex items-start gap-2">
+                <DialogTitle className="text-slate-900">{selectedFinding?.title}</DialogTitle>
+                {selectedFinding?.reviewed ? (
+                  <Badge variant="outline" className="bg-green-100 text-green-800 border-green-200">
+                    Reviewed
+                  </Badge>
+                ) : null}
+                {selectedFinding?.flaggedForFollowUp ? (
+                  <Badge variant="outline" className="bg-amber-100 text-amber-800 border-amber-200">
+                    Follow-Up
+                  </Badge>
+                ) : null}
+              </div>
               <Badge variant="outline" className={severityColors[selectedFinding?.severity || 'info']}>
                 {severityLabels[selectedFinding?.severity || 'info']}
               </Badge>
             </div>
             <DialogDescription className="text-slate-600">
-              {categoryLabels[selectedFinding?.category || 'citation']} • Paragraph {selectedFinding?.paragraphLocation}
+              {categoryLabels[selectedFinding?.category || 'citation']} • Paragraph {formatParagraphLocation(selectedFinding?.paragraphLocation ?? -1)}
             </DialogDescription>
           </DialogHeader>
 
@@ -369,17 +849,34 @@ export function Analysis() {
               <Textarea 
                 placeholder="Add your notes about this finding..."
                 rows={3}
+                value={notesDraft}
+                onChange={(event) => setNotesDraft(event.target.value)}
+                onBlur={() => void handleNotesBlur()}
+                disabled={isSavingNotes}
               />
+              <p className="text-xs text-slate-500 mt-2">
+                {isSavingNotes ? 'Saving notes…' : 'Notes save when you leave the field.'}
+              </p>
             </div>
 
             <div className="flex gap-2 pt-4">
-              <Button variant="outline" className="flex-1">
-                <CheckCircle className="h-4 w-4 mr-2" />
-                Mark as Reviewed
+              <Button
+                variant="outline"
+                className="flex-1"
+                onClick={() => void handleMarkReviewed()}
+                disabled={isUpdatingReviewState || Boolean(selectedFinding?.reviewed)}
+              >
+                {isUpdatingReviewState ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <CheckCircle className="h-4 w-4 mr-2" />}
+                {selectedFinding?.reviewed ? 'Reviewed' : 'Mark as Reviewed'}
               </Button>
-              <Button variant="outline" className="flex-1">
-                <Flag className="h-4 w-4 mr-2" />
-                Flag for Follow-Up
+              <Button
+                variant="outline"
+                className="flex-1"
+                onClick={() => void handleFlagForFollowUp()}
+                disabled={isUpdatingFollowUpState || Boolean(selectedFinding?.flaggedForFollowUp)}
+              >
+                {isUpdatingFollowUpState ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Flag className="h-4 w-4 mr-2" />}
+                {selectedFinding?.flaggedForFollowUp ? 'Flagged for Follow-Up' : 'Flag for Follow-Up'}
               </Button>
             </div>
           </div>
@@ -408,7 +905,7 @@ function FindingCard({ finding, onClick }: { finding: Finding; onClick: () => vo
       </div>
       <p className="text-xs text-slate-600 mb-3">{finding.description}</p>
       <div className="flex items-center justify-between">
-        <span className="text-xs text-slate-500">Paragraph {finding.paragraphLocation}</span>
+        <span className="text-xs text-slate-500">Paragraph {formatParagraphLocation(finding.paragraphLocation)}</span>
         <ExternalLink className="h-3 w-3 text-slate-400" />
       </div>
     </div>

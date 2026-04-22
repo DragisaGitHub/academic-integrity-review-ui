@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Upload as UploadIcon, FileText, CheckCircle, Loader2 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Input } from '../components/ui/input';
@@ -8,6 +8,9 @@ import { Button } from '../components/ui/button';
 import { Switch } from '../components/ui/switch';
 import { Progress } from '../components/ui/progress';
 import { useNavigate } from 'react-router';
+import { toast } from 'sonner';
+import { uploadDocumentToApi } from '../services/documents';
+import { createAnalysisToApi, getAnalysisStatusFromApi, saveAnalysisNotesForAnalysisToApi } from '../services/analyses';
 
 const analysisSteps = [
   'Extracting text from document',
@@ -17,12 +20,36 @@ const analysisSteps = [
   'Generating findings report',
 ];
 
+function wait(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'));
+      return;
+    }
+
+    const timeoutId = window.setTimeout(resolve, ms);
+
+    if (signal) {
+      const onAbort = () => {
+        window.clearTimeout(timeoutId);
+        reject(new DOMException('Aborted', 'AbortError'));
+      };
+
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+  });
+}
+
 export function Upload() {
   const navigate = useNavigate();
   const [fileName, setFileName] = useState<string>('');
+  const [file, setFile] = useState<File | null>(null);
+  const [uploadedDocumentId, setUploadedDocumentId] = useState<string | null>(null);
+  const [analysisId, setAnalysisId] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [currentStep, setCurrentStep] = useState(0);
   const [progress, setProgress] = useState(0);
+  const pollingAbortControllerRef = useRef<AbortController | null>(null);
 
   const [formData, setFormData] = useState({
     title: '',
@@ -40,32 +67,141 @@ export function Upload() {
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
+      setFile(file);
       setFileName(file.name);
+      setUploadedDocumentId(null);
+      setAnalysisId(null);
     }
   };
 
-  const handleStartAnalysis = () => {
+  useEffect(() => {
+    return () => {
+      pollingAbortControllerRef.current?.abort();
+    };
+  }, []);
+
+  const handleStartAnalysis = async () => {
+    if (!file && !uploadedDocumentId) return;
+
+    pollingAbortControllerRef.current?.abort();
+    const abortController = new AbortController();
+    pollingAbortControllerRef.current = abortController;
+
     setIsUploading(true);
     setCurrentStep(0);
     setProgress(0);
 
-    // Simulate analysis progress
-    const interval = setInterval(() => {
-      setProgress((prev) => {
-        const newProgress = prev + 2;
-        if (newProgress >= 100) {
-          clearInterval(interval);
-          setTimeout(() => {
-            navigate('/analysis/1');
-          }, 500);
-          return 100;
+    try {
+      let documentId = uploadedDocumentId;
+
+      if (!documentId) {
+        if (!file) throw new Error('No file selected');
+        const createdDocument = await uploadDocumentToApi({
+          file,
+          title: formData.title.trim() || file.name,
+          studentName: formData.studentName,
+          course: formData.course,
+          academicYear: formData.academicYear,
+          reviewPriority: 'low',
+        });
+        documentId = createdDocument.id;
+        setUploadedDocumentId(documentId);
+      }
+
+      const analysisDocumentId = Number(documentId);
+      if (!Number.isFinite(analysisDocumentId)) {
+        toast.error('Upload returned an invalid document id.');
+        setIsUploading(false);
+        setProgress(0);
+        setCurrentStep(0);
+        return;
+      }
+
+      const createdAnalysis = await createAnalysisToApi({ documentId: analysisDocumentId });
+      const createdAnalysisId = createdAnalysis.analysisId;
+
+      if (!createdAnalysisId) {
+        toast.error('Analysis started, but no analysis id was returned by the backend.');
+        setIsUploading(false);
+        setProgress(0);
+        setCurrentStep(0);
+        return;
+      }
+
+      setAnalysisId(createdAnalysisId);
+
+      if (formData.notes.trim()) {
+        try {
+          await saveAnalysisNotesForAnalysisToApi(createdAnalysisId, formData.notes);
+        } catch (error) {
+          console.error('Failed to save analysis notes', error);
+          toast.error('Analysis started, but the initial notes could not be saved.');
         }
-        if (newProgress % 20 === 0) {
-          setCurrentStep((step) => Math.min(step + 1, analysisSteps.length - 1));
+      }
+
+      let analyzingPollCount = 0;
+
+      try {
+        while (!abortController.signal.aborted) {
+          const statusResult = await getAnalysisStatusFromApi(createdAnalysisId, abortController.signal);
+
+          switch (statusResult.status) {
+            case 'pending':
+              setCurrentStep(0);
+              setProgress(15);
+              break;
+            case 'extracting':
+              setCurrentStep(1);
+              setProgress(35);
+              break;
+            case 'analyzing':
+              analyzingPollCount += 1;
+              setCurrentStep(analyzingPollCount >= 2 ? 3 : 2);
+              setProgress(analyzingPollCount >= 2 ? 75 : 60);
+              break;
+            case 'completed':
+              setCurrentStep(analysisSteps.length - 1);
+              setProgress(100);
+              await wait(500, abortController.signal);
+              navigate(`/analysis/${documentId}`);
+              return;
+            case 'failed':
+              toast.error(statusResult.errorMessage ?? 'Analysis failed. Please try again.');
+              setIsUploading(false);
+              setProgress(0);
+              setCurrentStep(0);
+              return;
+            default:
+              break;
+          }
+
+          await wait(3000, abortController.signal);
         }
-        return newProgress;
-      });
-    }, 100);
+      } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') {
+          return;
+        }
+
+        console.error('Failed to create analysis', error);
+        toast.error('Analysis polling failed. Please try again.');
+        setIsUploading(false);
+        setProgress(0);
+        setCurrentStep(0);
+        return;
+      }
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        return;
+      }
+
+      console.error('Upload failed', error);
+      toast.error('Upload failed. Please check the file and try again.');
+      setIsUploading(false);
+      setProgress(0);
+      setCurrentStep(0);
+      setUploadedDocumentId(null);
+      setAnalysisId(null);
+    }
   };
 
   return (
@@ -154,7 +290,7 @@ export function Upload() {
                   <Label htmlFor="course">Course</Label>
                   <Input
                     id="course"
-                    placeholder="e.g., CSCI 4950 - Advanced AI"
+                    placeholder="e.g., Course Code - Course Name"
                     value={formData.course}
                     onChange={(e) => setFormData({ ...formData, course: e.target.value })}
                     disabled={isUploading}
@@ -253,7 +389,7 @@ export function Upload() {
             className="w-full bg-slate-900 hover:bg-slate-800"
             size="lg"
             onClick={handleStartAnalysis}
-            disabled={!fileName || isUploading}
+            disabled={(!fileName && !uploadedDocumentId) || isUploading}
           >
             {isUploading ? (
               <>
@@ -275,6 +411,9 @@ export function Upload() {
               </CardTitle>
             </CardHeader>
             <CardContent className="pt-6">
+                {analysisId && !isUploading ? (
+                  <p className="text-xs text-slate-500 mb-4">Last analysis id: {analysisId}</p>
+                ) : null}
               {isUploading && (
                 <div className="mb-6">
                   <Progress value={progress} className="h-2" />

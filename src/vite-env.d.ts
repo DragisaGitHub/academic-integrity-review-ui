@@ -10,6 +10,12 @@ declare interface ImportMetaEnv {
   readonly VITE_API_BASE_URL?: string;
 }
 
+declare interface Window {
+  __APP_CONFIG__?: {
+    API_BASE_URL?: string;
+  };
+}
+
 declare interface ImportMeta {
   readonly env: ImportMetaEnv;
 }

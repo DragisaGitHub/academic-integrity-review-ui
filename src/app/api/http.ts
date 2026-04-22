@@ -96,3 +96,42 @@ export async function postJson<TResponse, TBody>(
     body: JSON.stringify(body),
   });
 }
+
+export async function patchJson<TResponse, TBody>(
+  path: string,
+  body: TBody,
+  init: Omit<RequestInit, 'method' | 'body'> = {},
+): Promise<TResponse> {
+  const headers = new Headers(init.headers);
+  if (!headers.has('content-type')) headers.set('content-type', 'application/json');
+
+  return requestJson<TResponse>(path, {
+    ...init,
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify(body),
+  });
+}
+
+export async function putJson<TResponse, TBody>(
+    path: string,
+    body: TBody,
+    init: Omit<RequestInit, 'method' | 'body'> = {},
+): Promise<TResponse> {
+  const headers = new Headers(init.headers);
+  if (!headers.has('content-type')) headers.set('content-type', 'application/json');
+
+  return requestJson<TResponse>(path, {
+    ...init,
+    method: 'PUT',
+    headers,
+    body: JSON.stringify(body),
+  });
+}
+
+export async function deleteJson<TResponse>(
+  path: string,
+  init: Omit<RequestInit, 'method'> = {},
+): Promise<TResponse> {
+  return requestJson<TResponse>(path, { ...init, method: 'DELETE' });
+}

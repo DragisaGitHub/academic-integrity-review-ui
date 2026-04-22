@@ -9,6 +9,19 @@ function normalizePath(path: string): string {
   return trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
 }
 
+function getRuntimeApiBaseUrl(): string {
+  if (typeof window === 'undefined') {
+    return '';
+  }
+
+  const runtimeBaseUrl = window.__APP_CONFIG__?.API_BASE_URL;
+  if (!runtimeBaseUrl || runtimeBaseUrl === '__API_BASE_URL__') {
+    return '';
+  }
+
+  return normalizeBaseUrl(runtimeBaseUrl);
+}
+
 /**
  * Backend API base URL.
  *
@@ -17,11 +30,13 @@ function normalizePath(path: string): string {
  */
 export const API_BASE_URL = normalizeBaseUrl(import.meta.env.VITE_API_BASE_URL ?? '');
 
+export const RESOLVED_API_BASE_URL = getRuntimeApiBaseUrl() || API_BASE_URL;
+
 /**
  * Builds an absolute or same-origin URL for API requests.
  */
 export function buildApiUrl(path: string): string {
   const normalizedPath = normalizePath(path);
-  if (!API_BASE_URL) return normalizedPath;
-  return `${API_BASE_URL}${normalizedPath}`;
+  if (!RESOLVED_API_BASE_URL) return normalizedPath;
+  return `${RESOLVED_API_BASE_URL}${normalizedPath}`;
 }
