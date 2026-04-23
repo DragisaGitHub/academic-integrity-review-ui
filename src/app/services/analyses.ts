@@ -1,10 +1,12 @@
 import type {
   AnalysisDetails,
-  AnalysisStatus,
   AnalysisSummary,
+  DocumentReference,
   Finding,
   FindingCategory,
   FindingSeverity,
+  AnalysisStatus,
+  ReviewPriority,
 } from '../types';
 import { apiEndpoints } from '../api';
 import { getJson, HttpError, patchJson, postJson } from '../api';
@@ -37,10 +39,6 @@ function asBoolean(value: unknown): boolean | undefined {
   return undefined;
 }
 
-function asArray(value: unknown): unknown[] | undefined {
-  return Array.isArray(value) ? value : undefined;
-}
-
 function emptySummary(): AnalysisSummary {
   return {
     missingCitations: 0,
@@ -71,32 +69,28 @@ export function computeSummaryFromFindings(findings: Finding[]): AnalysisSummary
           summary.unsupportedClaims += 1;
           break;
         case 'ai':
-          // Keep AI findings visible in the UI tabs; summary cards are derived
-          // from the UI's existing counters, and we intentionally don't
-          // overload "Unsupported Claims" with AI findings.
-          break;
         default:
           break;
       }
+
       return summary;
     },
     emptySummary(),
   );
 }
 
-function pickFirst<T>(...values: Array<T | undefined>): T | undefined {
-  for (const value of values) {
-    if (value !== undefined) return value;
-  }
-  return undefined;
+function parseReviewPriority(value: unknown): ReviewPriority {
+  if (typeof value !== 'string') return 'low';
+  const normalized = value.trim().toLowerCase();
+
+  if (normalized.includes('high')) return 'high';
+  if (normalized.includes('med')) return 'medium';
+  return 'low';
 }
 
-function parseCategory(value: unknown): FindingCategory {
-  const raw = (asString(value) ?? '').trim();
-  const normalized = raw.toUpperCase().replace(/\s+/g, '_');
+function parseFindingCategory(value: unknown): FindingCategory {
+  const normalized = (asString(value) ?? '').trim().toUpperCase().replace(/\s+/g, '_');
 
-  // Audited backend contract:
-  // PLAGIARISM | AI_GENERATED_CONTENT | CITATION_ISSUE | PARAPHRASING | OTHER
   switch (normalized) {
     case 'CITATION_ISSUE':
       return 'citation';
@@ -112,11 +106,9 @@ function parseCategory(value: unknown): FindingCategory {
   }
 }
 
-function parseSeverity(value: unknown): FindingSeverity {
-  const raw = (asString(value) ?? '').trim();
-  const normalized = raw.toUpperCase().replace(/\s+/g, '_');
+function parseFindingSeverity(value: unknown): FindingSeverity {
+  const normalized = (asString(value) ?? '').trim().toUpperCase().replace(/\s+/g, '_');
 
-  // Audited backend contract: LOW | MEDIUM | HIGH | CRITICAL
   switch (normalized) {
     case 'LOW':
       return 'info';
@@ -130,22 +122,59 @@ function parseSeverity(value: unknown): FindingSeverity {
   }
 }
 
-function mapAnalysisDtoToDetails(payload: unknown, documentId: string): AnalysisDetails | null {
+function parseParagraphLocation(value: unknown): number {
+  if (value === null || value === undefined) return -1;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value !== 'string') return -1;
+
+  const match = value.match(/-?\d+/);
+  if (!match) return -1;
+
+  const parsed = Number.parseInt(match[0], 10);
+  return Number.isFinite(parsed) ? parsed : -1;
+}
+
+function mapDocumentReference(payload: unknown, fallbackDocumentId?: string): DocumentReference | null {
+  if (!isRecord(payload)) {
+    return fallbackDocumentId
+      ? {
+          id: fallbackDocumentId,
+          title: '',
+          studentName: '',
+          course: '',
+        }
+      : null;
+  }
+
+  const numericId = asNumber(payload.id) ?? asNumber(payload.documentId);
+  const stringId = asString(payload.id) ?? asString(payload.documentId);
+  const id = stringId ?? (numericId !== undefined ? String(numericId) : fallbackDocumentId);
+  if (!id) return null;
+
+  return {
+    id,
+    title: asString(payload.title) ?? '',
+    studentName: asString(payload.studentName) ?? asString(payload.student) ?? '',
+    course: asString(payload.course) ?? '',
+  };
+}
+
+function mapAnalysisDtoToDetails(payload: unknown, fallbackDocumentId: string): AnalysisDetails | null {
   if (!isRecord(payload)) return null;
 
   // Audited backend contract for GET /api/analyses/document/{documentId}:
-  // { id:number, documentId:number, analysisDate:string|null, fullText:string|null, createdAt:string, updatedAt:string }
+  // { id:number, document:{ id, title, studentName, course }, analysisDate:string|null, fullText:string|null, createdAt:string, updatedAt:string }
   const idValue = asNumber(payload.id);
   if (idValue === undefined) return null;
 
-  const documentIdValue = asNumber(payload.documentId);
-  if (documentIdValue === undefined) return null;
+  const document = mapDocumentReference(payload.document, fallbackDocumentId);
+  if (!document) return null;
   const analysisDate = asString(payload.analysisDate);
   const fullText = asString(payload.fullText) ?? '';
 
   return {
     id: String(idValue),
-    documentId: String(documentIdValue),
+    document,
     analysisDate: analysisDate ?? undefined,
     summary: emptySummary(),
     fullText,
@@ -167,51 +196,24 @@ export async function getAnalysisByDocumentIdFromApi(documentId: string): Promis
 
 type FindingDto = Record<string, unknown>;
 
-function parseParagraphLocation(value: unknown): number {
-  // Audited backend contract: paragraphLocation is string | null.
-  if (value === null || value === undefined) return -1;
-  if (typeof value === 'number' && Number.isFinite(value)) return value;
-  if (typeof value !== 'string') return -1;
-
-  const match = value.match(/-?\d+/);
-  if (!match) return -1;
-
-  const parsed = Number.parseInt(match[0], 10);
-  return Number.isFinite(parsed) ? parsed : -1;
-}
-
 function mapFindingDto(dto: FindingDto, params: { documentId: string; analysisId: string; index: number }): Finding {
-  // Audited backend contract fields:
-  // id:number, category:enum, severity:enum, title:string,
-  // explanation:string|null, excerpt:string|null, paragraphLocation:string|null,
-  // suggestedAction:string|null
   const idValue = asNumber(dto.id);
   const id = idValue === undefined ? `${params.analysisId}-${params.index}` : String(idValue);
-
-  const paragraphLocation = parseParagraphLocation(dto.paragraphLocation);
-  const title = asString(dto.title) ?? 'Finding';
-  const description = asString(dto.explanation) ?? '';
-  const excerpt = asString(dto.excerpt) ?? '';
-  const recommendation = asString(dto.suggestedAction) ?? '';
-  const followUpQuestion = undefined;
-  const professorNotes = asString(dto.professorNotes) ?? '';
-  const reviewed = asBoolean(dto.reviewed) ?? false;
-  const flaggedForFollowUp = asBoolean(dto.flaggedForFollowUp) ?? false;
 
   return {
     id,
     documentId: params.documentId,
-    category: parseCategory(dto.category),
-    severity: parseSeverity(dto.severity),
-    title,
-    description,
-    excerpt,
-    paragraphLocation,
-    recommendation,
-    followUpQuestion,
-    reviewed,
-    professorNotes,
-    flaggedForFollowUp,
+    category: parseFindingCategory(dto.category),
+    severity: parseFindingSeverity(dto.severity),
+    title: asString(dto.title) ?? 'Finding',
+    description: asString(dto.explanation) ?? '',
+    excerpt: asString(dto.excerpt) ?? '',
+    paragraphLocation: parseParagraphLocation(dto.paragraphLocation),
+    recommendation: asString(dto.suggestedAction) ?? '',
+    followUpQuestion: undefined,
+    reviewed: asBoolean(dto.reviewed) ?? false,
+    professorNotes: asString(dto.professorNotes) ?? '',
+    flaggedForFollowUp: asBoolean(dto.flaggedForFollowUp) ?? false,
   };
 }
 
@@ -221,36 +223,29 @@ export interface UpdateFindingRequest {
   flaggedForFollowUp?: boolean;
 }
 
-type AnalysisListDto = Partial<{
-  id: string | number;
-  analysisId: string | number;
-  documentId: string | number;
-  status: string;
-  analysisStatus: string;
-  analysisDate: string;
-  createdAt: string;
-  updatedAt: string;
-  errorMessage: string;
-  message: string;
-  title: string;
-  documentTitle: string;
-  studentName: string;
-  student: string;
-  course: string;
-  document: Record<string, unknown>;
-}>;
+export async function getFindingsByAnalysisIdFromApi(params: {
+  analysisId: string;
+  documentId: string;
+  signal?: AbortSignal;
+}): Promise<Finding[]> {
+  if (!params.analysisId) return [];
 
-export interface AnalysisListItem {
-  id: string;
-  documentId?: string;
-  title: string;
-  studentName: string;
-  course: string;
-  status: AnalysisStatus;
-  analysisDate?: string;
-  createdAt?: string;
-  updatedAt?: string;
-  errorMessage?: string;
+  try {
+    const payload = await getJson<unknown>(apiEndpoints.analysisFindings(params.analysisId), {
+      signal: params.signal,
+    });
+
+    if (!Array.isArray(payload)) {
+      return [];
+    }
+
+    return payload
+      .filter(isRecord)
+      .map((dto, index) => mapFindingDto(dto as FindingDto, { ...params, index }));
+  } catch (error) {
+    if (error instanceof HttpError && error.status === 404) return [];
+    throw error;
+  }
 }
 
 export async function updateFindingForAnalysisFromApi(params: {
@@ -273,6 +268,44 @@ export async function updateFindingForAnalysisFromApi(params: {
     documentId: params.documentId,
     index: 0,
   });
+}
+
+type AnalysisListDto = Partial<{
+  id: string | number;
+  analysisId: string | number;
+  documentId: string | number;
+  status: string;
+  analysisStatus: string;
+  analysisDate: string;
+  createdAt: string;
+  updatedAt: string;
+  errorMessage: string;
+  message: string;
+  title: string;
+  documentTitle: string;
+  studentName: string;
+  student: string;
+  course: string;
+  submissionDate: string;
+  submittedAt: string;
+  reviewPriority: string;
+  priority: string;
+  document: Record<string, unknown>;
+}>;
+
+export interface AnalysisListItem {
+  id: string;
+  documentId?: string;
+  title: string;
+  studentName: string;
+  course: string;
+  reviewPriority: ReviewPriority;
+  status: AnalysisStatus;
+  submissionDate?: string;
+  analysisDate?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  errorMessage?: string;
 }
 
 function mapAnalysisListDto(dto: AnalysisListDto, index: number): AnalysisListItem | null {
@@ -301,7 +334,9 @@ function mapAnalysisListDto(dto: AnalysisListDto, index: number): AnalysisListIt
       asString(nestedDocument?.student) ??
       'Unknown',
     course: asString(dto.course) ?? asString(nestedDocument?.course) ?? '',
+    reviewPriority: parseReviewPriority(dto.reviewPriority ?? dto.priority ?? nestedDocument?.reviewPriority ?? nestedDocument?.priority),
     status: parseAnalysisStatus(dto.analysisStatus ?? dto.status),
+    submissionDate: asString(dto.submissionDate) ?? asString(dto.submittedAt) ?? asString(nestedDocument?.submissionDate) ?? asString(nestedDocument?.submittedAt),
     analysisDate: asString(dto.analysisDate),
     createdAt: asString(dto.createdAt),
     updatedAt: asString(dto.updatedAt),
@@ -311,97 +346,53 @@ function mapAnalysisListDto(dto: AnalysisListDto, index: number): AnalysisListIt
 
 export async function listAnalysesFromApi(): Promise<AnalysisListItem[]> {
   const payload = await getJson<unknown>(apiEndpoints.analysesApi);
-  if (!Array.isArray(payload)) return [];
+  const analysisItems = Array.isArray(payload)
+    ? payload
+    : isRecord(payload) && Array.isArray(payload.analyses)
+      ? payload.analyses
+      : [];
 
-  return payload
+  return analysisItems
     .filter(isRecord)
     .map((dto, index) => mapAnalysisListDto(dto as AnalysisListDto, index))
     .filter((analysis): analysis is AnalysisListItem => Boolean(analysis));
 }
 
-export async function saveAnalysisNotesForAnalysisToApi(analysisId: string, notes: string): Promise<void> {
-  if (!analysisId) return;
-  await postJson<void, { notes: string }>(apiEndpoints.analysisNotes(analysisId), { notes });
+export interface AnalysisNotesResult {
+  notes: string;
 }
 
-export async function getFindingsByAnalysisIdFromApi(params: {
-  analysisId: string;
-  documentId: string;
-  signal?: AbortSignal;
-}): Promise<Finding[]> {
-  if (!params.analysisId) return [];
+export async function getAnalysisNotesFromApi(analysisId: string): Promise<AnalysisNotesResult> {
+  if (!analysisId) {
+    return { notes: '' };
+  }
 
   try {
-    const payload = await getJson<unknown>(apiEndpoints.analysisFindings(params.analysisId), {
-      signal: params.signal,
-    });
+    const payload = await getJson<unknown>(apiEndpoints.analysisNotes(analysisId));
 
-    if (!Array.isArray(payload)) {
-      throw new Error('Findings endpoint returned an unexpected payload shape.');
+    if (typeof payload === 'string') {
+      return { notes: payload };
     }
 
-    return payload
-      .filter(isRecord)
-      .map((dto, index) => mapFindingDto(dto as FindingDto, { ...params, index }));
+    if (!isRecord(payload)) {
+      return { notes: '' };
+    }
+
+    return {
+      notes: asString(payload.notes) ?? asString(payload.content) ?? asString(payload.value) ?? '',
+    };
   } catch (error) {
-    if (error instanceof HttpError && error.status === 404) return [];
+    if (error instanceof HttpError && error.status === 404) {
+      return { notes: '' };
+    }
+
     throw error;
   }
 }
 
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(new DOMException('Aborted', 'AbortError'));
-      return;
-    }
-
-    const timeoutId = window.setTimeout(() => resolve(), ms);
-
-    if (signal) {
-      const onAbort = () => {
-        window.clearTimeout(timeoutId);
-        reject(new DOMException('Aborted', 'AbortError'));
-      };
-      signal.addEventListener('abort', onAbort, { once: true });
-    }
-  });
-}
-
-export interface FindingsRetryOptions {
-  /** Total attempts including the initial request. */
-  maxAttempts: number;
-  intervalMs: number;
-  signal?: AbortSignal;
-}
-
-/**
- * Loads findings, retrying when the backend returns an empty findings list.
- *
- * Useful when analysis creation is asynchronous and findings may not be ready yet.
- */
-export async function getFindingsByAnalysisIdFromApiWithRetry(
-  params: { analysisId: string; documentId: string; signal?: AbortSignal },
-  options: Partial<FindingsRetryOptions> = {},
-): Promise<Finding[]> {
-  const maxAttempts = options.maxAttempts ?? 10;
-  const intervalMs = options.intervalMs ?? 3000;
-  const signal = options.signal ?? params.signal;
-
-  if (maxAttempts <= 1) {
-    return getFindingsByAnalysisIdFromApi({ ...params, signal });
-  }
-
-  let findings = await getFindingsByAnalysisIdFromApi({ ...params, signal });
-  if (findings.length > 0) return findings;
-
-  for (let attempt = 2; attempt <= maxAttempts; attempt += 1) {
-    await sleep(intervalMs, signal);
-    findings = await getFindingsByAnalysisIdFromApi({ ...params, signal });
-    if (findings.length > 0) return findings;
-  }
-
-  return findings;
+export async function saveAnalysisNotesForAnalysisToApi(analysisId: string, notes: string): Promise<void> {
+  if (!analysisId) return;
+  await postJson<void, { notes: string }>(apiEndpoints.analysisNotes(analysisId), { notes });
 }
 
 export interface CreateAnalysisRequest {
@@ -447,9 +438,7 @@ export async function getAnalysisStatusFromApi(
   }
 
   return {
-    status: parseAnalysisStatus(
-        payload.analysisStatus ?? payload.status
-    ),
+    status: parseAnalysisStatus(payload.analysisStatus ?? payload.status),
     errorMessage: asString(payload.errorMessage) ?? asString(payload.message) ?? undefined,
   };
 }

@@ -1,4 +1,4 @@
-import type { FinalDecision, ReviewChecklist, ReviewNote, ReviewNoteUpsertRequest } from '../types';
+import type { DocumentReference, FinalDecision, ReviewChecklist, ReviewNote, ReviewNoteUpsertRequest } from '../types';
 import { apiEndpoints } from '../api';
 import { getJson, HttpError, postJson } from '../api';
 
@@ -105,6 +105,17 @@ function mapChecklist(payload: unknown): ReviewChecklist {
   };
 }
 
+function mapDocumentReference(payload: unknown, fallbackDocumentId: string): DocumentReference {
+  const record = isRecord(payload) ? payload : {};
+
+  return {
+    id: asString(record.id) ?? fallbackDocumentId,
+    title: asString(record.title) ?? '',
+    studentName: asString(record.studentName) ?? '',
+    course: asString(record.course) ?? '',
+  };
+}
+
 function mapReviewNoteDtoToModel(documentId: string, payload: unknown): ReviewNote {
   const record = isRecord(payload) ? payload : {};
 
@@ -118,7 +129,7 @@ function mapReviewNoteDtoToModel(documentId: string, payload: unknown): ReviewNo
   const updatedAt = asString(record.updatedAt ?? record.updated_at ?? record.lastModifiedAt);
 
   return {
-    documentId,
+    document: mapDocumentReference(record.document, documentId),
     notes,
     checklist: mapChecklist(record),
     finalDecision: parseFinalDecision(record.finalDecision ?? record.decision),

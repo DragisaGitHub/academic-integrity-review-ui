@@ -11,6 +11,8 @@ import { Link } from 'react-router';
 import { toast } from 'sonner';
 import { buildKpisFromDocuments, buildPriorityDistributionFromDocuments } from '../services/kpis';
 import type { Document } from '../types';
+import { getAnalysisDetailRoute } from '../routeAccess';
+import { listAnalysesFromApi, type AnalysisListItem } from '../services/analyses';
 import { listDocumentsFromApi } from '../services/documents';
 import { formatDateOrDash } from '../utils/dateFormat';
 import {
@@ -28,6 +30,7 @@ function normalizeCourse(value: string): string {
 
 export function Dashboard() {
   const [documents, setDocuments] = useState<Document[]>([]);
+  const [analyses, setAnalyses] = useState<AnalysisListItem[]>([]);
   const [courseFilter, setCourseFilter] = useState('all');
 
   const kpis = useMemo(() => buildKpisFromDocuments(documents), [documents]);
@@ -54,8 +57,8 @@ export function Dashboard() {
   const courseOptions = useMemo(() => {
     const map = new Map<string, string>();
 
-    for (const doc of documents) {
-      const course = doc.course.trim();
+    for (const analysis of analyses) {
+      const course = analysis.course.trim();
       if (!course) continue;
       const key = normalizeCourse(course);
       if (!map.has(key)) map.set(key, course);
@@ -66,10 +69,10 @@ export function Dashboard() {
       .sort((a, b) => a.label.localeCompare(b.label));
   }, [documents]);
 
-  const filteredDocuments = useMemo(() => {
-    if (courseFilter === 'all') return documents;
-    return documents.filter((d) => normalizeCourse(d.course) === courseFilter);
-  }, [documents, courseFilter]);
+  const filteredAnalyses = useMemo(() => {
+    if (courseFilter === 'all') return analyses;
+    return analyses.filter((analysis) => normalizeCourse(analysis.course) === courseFilter);
+  }, [analyses, courseFilter]);
 
   useEffect(() => {
     let cancelled = false;
@@ -82,6 +85,16 @@ export function Dashboard() {
       .catch((err: unknown) => {
         console.warn('Failed to load documents from backend API', err);
         toast.error('Could not reach the backend API. Please try again.');
+      });
+
+    void listAnalysesFromApi()
+      .then((items) => {
+        if (cancelled) return;
+        setAnalyses(items);
+      })
+      .catch((err: unknown) => {
+        console.warn('Failed to load analyses from backend API', err);
+        toast.error('Could not load analyses from the backend API.');
       });
 
     return () => {
@@ -166,57 +179,51 @@ export function Dashboard() {
                     <TableHead className="text-slate-600">Document Title</TableHead>
                     <TableHead className="text-slate-600">Student</TableHead>
                     <TableHead className="text-slate-600">Course</TableHead>
-                    <TableHead className="text-slate-600">Submitted</TableHead>
+                    <TableHead className="text-slate-600">Updated</TableHead>
                     <TableHead className="text-slate-600">Priority</TableHead>
                     <TableHead className="text-slate-600">Status</TableHead>
                     <TableHead className="text-slate-600 text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {filteredDocuments.map((doc) => (
-                    <TableRow key={doc.id} className="border-slate-200">
+                  {filteredAnalyses.map((analysis) => (
+                    <TableRow key={analysis.id} className="border-slate-200">
                       <TableCell>
                         <div className="max-w-xs">
-                          <p className="text-sm text-slate-900 truncate">{doc.title}</p>
+                          <p className="text-sm text-slate-900 truncate">{analysis.title}</p>
                         </div>
                       </TableCell>
-                      <TableCell className="text-sm text-slate-700">{doc.studentName}</TableCell>
-                      <TableCell className="text-xs text-slate-600">{doc.course}</TableCell>
+                      <TableCell className="text-sm text-slate-700">{analysis.studentName}</TableCell>
+                      <TableCell className="text-xs text-slate-600">{analysis.course || '—'}</TableCell>
                       <TableCell className="text-xs text-slate-600">
-                        {formatDateOrDash(doc.submissionDate, {
+                        {formatDateOrDash(analysis.updatedAt ?? analysis.analysisDate ?? analysis.createdAt ?? analysis.submissionDate, {
                           month: 'short',
                           day: 'numeric',
                         })}
                       </TableCell>
                       <TableCell>
-                        <Badge variant="outline" className={reviewPriorityBadgeClass[doc.reviewPriority]}>
-                          {reviewPriorityLabelLong[doc.reviewPriority]}
+                        <Badge variant="outline" className={reviewPriorityBadgeClass[analysis.reviewPriority]}>
+                          {reviewPriorityLabelLong[analysis.reviewPriority]}
                         </Badge>
                       </TableCell>
                       <TableCell>
-                        {doc.analysisStatus && doc.analysisStatus !== 'completed' ? (
-                          <div className="space-y-1">
-                            <Badge variant="outline" className={analysisStatusBadgeClass[doc.analysisStatus]}>
-                              {doc.analysisStatus === 'pending' || doc.analysisStatus === 'extracting' || doc.analysisStatus === 'analyzing' ? (
-                                <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                              ) : null}
-                              {analysisStatusLabel[doc.analysisStatus]}
-                            </Badge>
-                            {doc.analysisStatus === 'failed' && doc.analysisErrorMessage ? (
-                              <p className="text-xs text-red-600 max-w-[180px] truncate" title={doc.analysisErrorMessage}>
-                                {doc.analysisErrorMessage}
-                              </p>
+                        <div className="space-y-1">
+                          <Badge variant="outline" className={analysisStatusBadgeClass[analysis.status]}>
+                            {analysis.status === 'pending' || analysis.status === 'extracting' || analysis.status === 'analyzing' ? (
+                              <Loader2 className="h-3 w-3 mr-1 animate-spin" />
                             ) : null}
-                          </div>
-                        ) : (
-                          <Badge variant="outline" className={reviewStatusBadgeClass[doc.status]}>
-                            {reviewStatusLabel[doc.status]}
+                            {analysisStatusLabel[analysis.status]}
                           </Badge>
-                        )}
+                          {analysis.status === 'failed' && analysis.errorMessage ? (
+                            <p className="text-xs text-red-600 max-w-[180px] truncate" title={analysis.errorMessage}>
+                              {analysis.errorMessage}
+                            </p>
+                          ) : null}
+                        </div>
                       </TableCell>
                       <TableCell className="text-right">
-                        <Link to={`/analysis/${doc.id}`}>
-                          <Button variant="ghost" size="sm" className="text-slate-700 hover:text-slate-900">
+                        <Link to={analysis.documentId ? getAnalysisDetailRoute(analysis.documentId) : '#'}>
+                          <Button variant="ghost" size="sm" className="text-slate-700 hover:text-slate-900" disabled={!analysis.documentId}>
                             View
                           </Button>
                         </Link>

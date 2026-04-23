@@ -160,9 +160,9 @@ export function NotificationBell() {
       <PopoverContent align="end" sideOffset={8} className="z-[80] w-[360px] p-0">
         <div className="flex items-center justify-between px-4 py-3">
           <div>
-            <p className="text-sm font-semibold">Notifications</p>
+            <p className="text-sm font-semibold">System Notifications</p>
             <p className="text-xs text-muted-foreground">
-              {unreadCount > 0 ? `${unreadCount} unread` : 'All caught up'}
+              {unreadCount > 0 ? `${unreadCount} unread` : 'No unread system updates'}
             </p>
           </div>
 
@@ -195,7 +195,7 @@ export function NotificationBell() {
             <div className="space-y-1">
               <p className="text-sm font-medium">No notifications yet</p>
               <p className="text-sm text-muted-foreground">
-                You&apos;ll be notified when analyses complete or need attention.
+                System-wide analysis updates will appear here when available.
               </p>
             </div>
           </div>

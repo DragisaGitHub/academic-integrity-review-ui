@@ -8,6 +8,51 @@ export type FindingCategory = 'citation' | 'reference' | 'fact' | 'style' | 'cla
 export type FinalDecision = 'accept' | 'accept-with-revisions' | 'request-clarification' | 'escalate' | null;
 export type NotificationType = 'analysis-completed' | 'analysis-failed';
 export type NotificationSeverity = 'success' | 'error' | 'info';
+export type UserRole = 'ADMIN' | 'USER';
+
+export interface AppUser {
+  id: string;
+  username: string;
+  displayName: string;
+  role: UserRole;
+  enabled: boolean;
+  settingsCompleted?: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface LoginRequest {
+  username: string;
+  password: string;
+}
+
+export interface LoginResponse {
+  token: string;
+  user: AppUser;
+}
+
+export interface ChangePasswordRequest {
+  currentPassword: string;
+  newPassword: string;
+}
+
+export interface CreateUserRequest {
+  username: string;
+  displayName: string;
+  password: string;
+  role: UserRole;
+  enabled: boolean;
+}
+
+export interface UpdateUserRequest {
+  displayName?: string;
+  role?: UserRole;
+  enabled?: boolean;
+}
+
+export interface ResetUserPasswordRequest {
+  newPassword: string;
+}
 
 export interface Notification {
   id: string;
@@ -48,6 +93,13 @@ export interface Document {
   hasReviewNote?: boolean;
 }
 
+export interface DocumentReference {
+  id: string;
+  title: string;
+  studentName: string;
+  course: string;
+}
+
 export interface Finding {
   id: string;
   documentId: string;
@@ -79,7 +131,7 @@ export interface AnalysisSummary {
  */
 export interface AnalysisDetails {
   id: string;
-  documentId: string;
+  document: DocumentReference;
   analysisDate?: string;
   summary: AnalysisSummary;
   fullText: string;
@@ -106,7 +158,7 @@ export interface ReviewChecklist {
 }
 
 export interface ReviewNote {
-  documentId: string;
+  document: DocumentReference;
   notes: string;
   checklist: ReviewChecklist;
   finalDecision: FinalDecision;

@@ -6,6 +6,7 @@ import { Link } from 'react-router';
 import { Badge } from '../components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table';
 import { toast } from 'sonner';
+import { getAnalysisDetailRoute } from '../routeAccess';
 import { listAnalysesFromApi, type AnalysisListItem } from '../services/analyses';
 import { analysisStatusBadgeClass, analysisStatusLabel } from '../utils/reviewPresentation';
 import { formatDateOrDash } from '../utils/dateFormat';
@@ -42,11 +43,6 @@ export function Analyses() {
       cancelled = true;
     };
   }, []);
-
-  const activeAnalyses = useMemo(
-    () => analyses.filter((analysis) => analysis.status !== 'completed'),
-    [analyses],
-  );
 
   if (isLoading) {
     return (
@@ -85,13 +81,13 @@ export function Analyses() {
     );
   }
 
-  if (activeAnalyses.length === 0) {
+  if (analyses.length === 0) {
     return (
       <div className="max-w-4xl mx-auto">
         <Card className="border-slate-200">
           <CardContent className="p-12 text-center">
             <FileText className="h-16 w-16 text-slate-400 mx-auto mb-4" />
-            <h3 className="text-slate-900 mb-2">No Active Analyses</h3>
+            <h3 className="text-slate-900 mb-2">No Analyses Yet</h3>
             <p className="text-sm text-slate-600 mb-6 max-w-md mx-auto">
               Upload a document to begin analyzing student papers for academic integrity patterns.
             </p>
@@ -109,8 +105,8 @@ export function Analyses() {
   return (
     <div className="max-w-6xl mx-auto space-y-6">
       <div>
-        <h2 className="text-slate-900 mb-1">Active Analyses</h2>
-        <p className="text-sm text-slate-600">Track documents that are still processing or need attention.</p>
+        <h2 className="text-slate-900 mb-1">Analyses</h2>
+        <p className="text-sm text-slate-600">Track document analyses and open a document&apos;s analysis details.</p>
       </div>
 
       <Card className="border-slate-200">
@@ -127,7 +123,7 @@ export function Analyses() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {activeAnalyses.map((analysis) => (
+              {analyses.map((analysis) => (
                 <TableRow key={analysis.id} className="border-slate-200">
                   <TableCell>
                     <div>
@@ -161,7 +157,7 @@ export function Analyses() {
                   </TableCell>
                   <TableCell className="text-right">
                     {analysis.documentId ? (
-                      <Link to={`/analysis/${analysis.documentId}`}>
+                      <Link to={getAnalysisDetailRoute(analysis.documentId)}>
                         <Button variant="outline" size="sm">Open</Button>
                       </Link>
                     ) : (

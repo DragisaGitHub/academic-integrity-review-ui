@@ -1,11 +1,16 @@
 import { createBrowserRouter } from 'react-router';
+import { RequireAuth } from './auth/RequireAuth';
+import { RequireAdminRole, RequireUserRole } from './auth/RequireRole';
+import { AdminLayout } from './components/layout/AdminLayout';
 import { AppLayout } from './components/layout/AppLayout';
 import { 
+  AdminUsers,
   Dashboard, 
   Upload, 
   Analysis, 
   Analyses, 
   History, 
+  Login,
   Settings, 
   ReviewNotes, 
   NotFound 
@@ -13,16 +18,41 @@ import {
 
 export const router = createBrowserRouter([
   {
-    path: '/',
-    Component: AppLayout,
+    path: '/login',
+    Component: Login,
+  },
+  {
+    Component: RequireAuth,
     children: [
-      { index: true, Component: Dashboard },
-      { path: 'upload', Component: Upload },
-      { path: 'analysis/:id', Component: Analysis },
-      { path: 'analyses', Component: Analyses },
-      { path: 'review-notes/:id', Component: ReviewNotes },
-      { path: 'history', Component: History },
-      { path: 'settings', Component: Settings },
+      {
+        Component: RequireUserRole,
+        children: [
+          {
+            Component: AppLayout,
+            children: [
+              { path: '/', Component: Dashboard },
+              { path: '/upload', Component: Upload },
+              { path: '/analyses', Component: Analyses },
+              { path: '/analyses/:documentId', Component: Analysis },
+              { path: '/review-notes/:documentId', Component: ReviewNotes },
+              { path: '/history', Component: History },
+              { path: '/settings', Component: Settings },
+            ],
+          },
+        ],
+      },
+      {
+        Component: RequireAdminRole,
+        children: [
+          {
+            path: '/admin',
+            Component: AdminLayout,
+            children: [
+              { path: 'users', Component: AdminUsers },
+            ],
+          },
+        ],
+      },
       { path: '*', Component: NotFound },
     ],
   },

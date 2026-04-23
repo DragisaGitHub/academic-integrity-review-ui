@@ -2,6 +2,24 @@ import { buildApiUrl } from './config';
 
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 
+type AuthStateHandlers = {
+  getAccessToken?: () => string | null;
+  onUnauthorized?: () => void;
+};
+
+type RequestJsonOptions = Omit<RequestInit, 'method'> & {
+  method?: HttpMethod;
+  skipAuth?: boolean;
+  skipUnauthorizedRedirect?: boolean;
+};
+
+const authStateHandlers: AuthStateHandlers = {};
+
+export function configureHttpAuthHandlers(handlers: AuthStateHandlers): void {
+  authStateHandlers.getAccessToken = handlers.getAccessToken;
+  authStateHandlers.onUnauthorized = handlers.onUnauthorized;
+}
+
 export class HttpError extends Error {
   readonly status: number;
   readonly statusText: string;
@@ -44,18 +62,30 @@ async function readResponseBody(response: Response): Promise<unknown> {
  */
 export async function requestJson<TResponse>(
   path: string,
-  init: Omit<RequestInit, 'method'> & { method?: HttpMethod } = {},
+  init: RequestJsonOptions = {},
 ): Promise<TResponse> {
   const url = buildApiUrl(path);
+  const { skipAuth, skipUnauthorizedRedirect, ...requestInit } = init;
 
-  const headers = new Headers(init.headers);
+  const headers = new Headers(requestInit.headers);
   if (!headers.has('accept')) headers.set('accept', 'application/json');
 
-  const response = await fetch(url, { ...init, headers });
+  if (!skipAuth) {
+    const accessToken = authStateHandlers.getAccessToken?.();
+    if (accessToken && !headers.has('authorization')) {
+      headers.set('authorization', `Bearer ${accessToken}`);
+    }
+  }
+
+  const response = await fetch(url, { ...requestInit, headers });
 
   if (!response.ok) {
     const body = await readResponseBody(response);
     const message = isRecord(body) && typeof body.message === 'string' ? body.message : undefined;
+
+    if (response.status === 401 && !skipUnauthorizedRedirect) {
+      authStateHandlers.onUnauthorized?.();
+    }
 
     throw new HttpError({
       status: response.status,
@@ -77,14 +107,14 @@ export async function requestJson<TResponse>(
   return (await response.json()) as TResponse;
 }
 
-export async function getJson<TResponse>(path: string, init: Omit<RequestInit, 'method'> = {}): Promise<TResponse> {
+export async function getJson<TResponse>(path: string, init: Omit<RequestJsonOptions, 'method'> = {}): Promise<TResponse> {
   return requestJson<TResponse>(path, { ...init, method: 'GET' });
 }
 
 export async function postJson<TResponse, TBody>(
   path: string,
   body: TBody,
-  init: Omit<RequestInit, 'method' | 'body'> = {},
+  init: Omit<RequestJsonOptions, 'method' | 'body'> = {},
 ): Promise<TResponse> {
   const headers = new Headers(init.headers);
   if (!headers.has('content-type')) headers.set('content-type', 'application/json');
@@ -100,7 +130,7 @@ export async function postJson<TResponse, TBody>(
 export async function patchJson<TResponse, TBody>(
   path: string,
   body: TBody,
-  init: Omit<RequestInit, 'method' | 'body'> = {},
+  init: Omit<RequestJsonOptions, 'method' | 'body'> = {},
 ): Promise<TResponse> {
   const headers = new Headers(init.headers);
   if (!headers.has('content-type')) headers.set('content-type', 'application/json');
@@ -116,7 +146,7 @@ export async function patchJson<TResponse, TBody>(
 export async function putJson<TResponse, TBody>(
     path: string,
     body: TBody,
-    init: Omit<RequestInit, 'method' | 'body'> = {},
+  init: Omit<RequestJsonOptions, 'method' | 'body'> = {},
 ): Promise<TResponse> {
   const headers = new Headers(init.headers);
   if (!headers.has('content-type')) headers.set('content-type', 'application/json');
@@ -131,7 +161,7 @@ export async function putJson<TResponse, TBody>(
 
 export async function deleteJson<TResponse>(
   path: string,
-  init: Omit<RequestInit, 'method'> = {},
+  init: Omit<RequestJsonOptions, 'method'> = {},
 ): Promise<TResponse> {
   return requestJson<TResponse>(path, { ...init, method: 'DELETE' });
 }

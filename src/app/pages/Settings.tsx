@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Save, Shield } from 'lucide-react';
 import { toast } from 'sonner';
+import { useAuth } from '../auth/AuthContext';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -12,6 +13,7 @@ import {
   applyColorThemePreference,
   defaultAppSettings,
   getAppSettingsFromApi,
+  saveAppSettings,
   saveAppSettingsToApi,
 } from '../services/settings';
 
@@ -48,6 +50,7 @@ function retentionPeriodToDays(period: AppSettings['dataRetention']['automaticDe
 }
 
 export function Settings() {
+  const { currentUser, isAuthenticated, isInitializing, markSettingsCompleted } = useAuth();
   const [settings, setSettings] = useState<AppSettings>(defaultAppSettings);
   const [baselineSettings, setBaselineSettings] = useState<AppSettings>(defaultAppSettings);
   const [errors, setErrors] = useState<SettingsFieldErrors>({});
@@ -57,13 +60,22 @@ export function Settings() {
   const [hasLoadedFromBackend, setHasLoadedFromBackend] = useState<boolean>(false);
 
   useEffect(() => {
+    if (isInitializing) {
+      return;
+    }
+
+    if (!isAuthenticated || currentUser?.role !== 'USER') {
+      setIsLoading(false);
+      return;
+    }
+
     let cancelled = false;
 
     async function load(): Promise<void> {
       setIsLoading(true);
 
       try {
-        const loaded = await getAppSettingsFromApi();
+        const loaded = await getAppSettingsFromApi({ userId: currentUser.id });
         if (cancelled) return;
         setSettings(loaded);
         setBaselineSettings(loaded);
@@ -88,7 +100,7 @@ export function Settings() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [currentUser?.role, isAuthenticated, isInitializing]);
 
   useEffect(() => {
     if (!hasLoadedFromBackend) return;
@@ -132,8 +144,14 @@ export function Settings() {
     setIsSaving(true);
     try {
       await saveAppSettingsToApi(settings);
+      if (currentUser) {
+        saveAppSettings(currentUser.id, settings);
+      }
+      markSettingsCompleted();
       setLastSavedSnapshot(currentSnapshot);
       setBaselineSettings(settings);
+      setHasLoadedFromBackend(true);
+      applyColorThemePreference(settings.interfacePreferences.colorTheme);
       toast.success('Settings saved.');
     } catch {
       toast.error('Failed to save settings to the backend.');

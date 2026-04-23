@@ -373,7 +373,7 @@ export function History() {
                   </TableCell>
                   <TableCell className="text-right">
                     <div className="flex items-center justify-end gap-1">
-                      <Link to={`/analysis/${doc.id}`}>
+                      <Link to={`/analyses/${doc.id}`}>
                         <Button variant="ghost" size="sm">
                           <Eye className="h-4 w-4" />
                         </Button>

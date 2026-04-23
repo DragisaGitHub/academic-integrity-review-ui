@@ -1,4 +1,5 @@
 import { apiEndpoints, getJson, HttpError, requestJson } from '../api';
+import { getAnalysisDetailRoute } from '../routeAccess';
 import type { Notification, NotificationListResult, NotificationSeverity, NotificationType } from '../types';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -67,7 +68,7 @@ function defaultRoute(type: NotificationType, documentId: string): string {
     case 'analysis-completed':
     case 'analysis-failed':
     default:
-      return `/analysis/${encodeURIComponent(documentId)}`;
+      return getAnalysisDetailRoute(documentId);
   }
 }
 
@@ -106,7 +107,6 @@ function emptyNotifications(): NotificationListResult {
 
 export interface ListNotificationsOptions {
   limit?: number;
-  unreadOnly?: boolean;
   signal?: AbortSignal;
 }
 
@@ -115,12 +115,14 @@ export async function listNotificationsFromApi(
 ): Promise<NotificationListResult> {
   const searchParams = new URLSearchParams();
   if (typeof options.limit === 'number') searchParams.set('limit', String(options.limit));
-  if (options.unreadOnly) searchParams.set('unreadOnly', 'true');
 
   const path = searchParams.size > 0 ? `${apiEndpoints.notifications}?${searchParams.toString()}` : apiEndpoints.notifications;
 
   try {
-    const payload = await getJson<unknown>(path, { signal: options.signal });
+    const payload = await getJson<unknown>(path, {
+      signal: options.signal,
+      skipUnauthorizedRedirect: true,
+    });
 
     if (Array.isArray(payload)) {
       const notifications = payload
@@ -145,7 +147,7 @@ export async function listNotificationsFromApi(
       unreadCount: asNumber(payload.unreadCount) ?? notifications.filter((item) => !item.read).length,
     };
   } catch (error) {
-    if (error instanceof HttpError && [404, 405, 501].includes(error.status)) {
+    if (error instanceof HttpError && [401, 403, 404, 405, 501].includes(error.status)) {
       return emptyNotifications();
     }
 
@@ -158,11 +160,13 @@ export async function markNotificationAsReadToApi(id: string): Promise<void> {
 
   await requestJson<void>(apiEndpoints.notificationRead(id), {
     method: 'PATCH',
+    skipUnauthorizedRedirect: true,
   });
 }
 
 export async function markAllNotificationsAsReadToApi(): Promise<void> {
   await requestJson<void>(apiEndpoints.notificationsReadAll, {
     method: 'PATCH',
+    skipUnauthorizedRedirect: true,
   });
 }

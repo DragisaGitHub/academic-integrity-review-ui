@@ -1,8 +1,8 @@
-import type { AppSettings, RetentionPeriod, UiDensityPreference, UiThemePreference } from '../types';
+import type { AppSettings, AppUser, RetentionPeriod, UiDensityPreference, UiThemePreference } from '../types';
 import { apiEndpoints } from '../api';
 import { getJson, HttpError, postJson } from '../api';
 
-const SETTINGS_STORAGE_KEY = 'academicIntegrityReview.settings.v1';
+const SETTINGS_STORAGE_KEY_PREFIX = 'academicIntegrityReview.settings.v2';
 
 export const defaultAppSettings: AppSettings = {
   profile: {
@@ -197,6 +197,7 @@ function retentionDaysToPeriod(days: number): RetentionPeriod {
 
 /** Flat backend contract for GET/POST /api/settings */
 export interface SettingsDto {
+  settingsCompleted?: boolean;
   professorName: string;
   department: string;
   university: string;
@@ -218,6 +219,39 @@ export interface SettingsDto {
   displayDensity: BackendDisplayDensity;
   showSeverityBadges: boolean;
   readingLayout: string;
+}
+
+export type UserSettingsBootstrap = {
+  settings: AppSettings;
+  settingsCompleted: boolean;
+};
+
+function getSettingsStorageKey(userId: string): string {
+  return `${SETTINGS_STORAGE_KEY_PREFIX}.${userId}`;
+}
+
+function getRequiredSettingsCompletion(settings: AppSettings): boolean {
+  return Boolean(
+    settings.profile.fullName.trim() &&
+    settings.profile.department.trim() &&
+    settings.profile.university.trim() &&
+    settings.profile.email.trim(),
+  );
+}
+
+function resolveSettingsCompleted(payload: unknown, settings: AppSettings, fallback?: boolean): boolean {
+  if (isRecord(payload)) {
+    const explicitCompletion = asBoolean(payload.settingsCompleted);
+    if (explicitCompletion !== undefined) {
+      return explicitCompletion;
+    }
+  }
+
+  if (fallback !== undefined) {
+    return fallback;
+  }
+
+  return getRequiredSettingsCompletion(settings);
 }
 
 function mergeWithDefaults(partial: unknown): AppSettings {
@@ -415,9 +449,9 @@ function mapSettingsModelToDto(settings: AppSettings): unknown {
   return dto;
 }
 
-export function loadAppSettings(): AppSettings {
+export function loadAppSettings(userId: string): AppSettings {
   try {
-    const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
+    const raw = localStorage.getItem(getSettingsStorageKey(userId));
     if (!raw) return defaultAppSettings;
 
     return mergeWithDefaults(JSON.parse(raw) as unknown);
@@ -426,12 +460,32 @@ export function loadAppSettings(): AppSettings {
   }
 }
 
-export function saveAppSettings(settings: AppSettings): void {
-  localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+export function saveAppSettings(userId: string, settings: AppSettings): void {
+  localStorage.setItem(getSettingsStorageKey(userId), JSON.stringify(settings));
 }
 
-export function resetAppSettings(): void {
-  localStorage.removeItem(SETTINGS_STORAGE_KEY);
+export function resetAppSettings(userId?: string): void {
+  if (userId) {
+    localStorage.removeItem(getSettingsStorageKey(userId));
+    return;
+  }
+
+  const keysToRemove: string[] = [];
+  for (let index = 0; index < localStorage.length; index += 1) {
+    const key = localStorage.key(index);
+    if (key?.startsWith(SETTINGS_STORAGE_KEY_PREFIX)) {
+      keysToRemove.push(key);
+    }
+  }
+
+  for (const key of keysToRemove) {
+    localStorage.removeItem(key);
+  }
+}
+
+export interface GetAppSettingsOptions {
+  optional?: boolean;
+  userId?: string;
 }
 
 /**
@@ -439,14 +493,22 @@ export function resetAppSettings(): void {
  *
  * GET /api/settings
  */
-export async function getAppSettingsFromApi(): Promise<AppSettings> {
+export async function getAppSettingsFromApi(options: GetAppSettingsOptions = {}): Promise<AppSettings> {
   try {
-    const payload = await getJson<unknown>(apiEndpoints.settingsApi);
+    const payload = await getJson<unknown>(apiEndpoints.settingsApi, {
+      skipUnauthorizedRedirect: options.optional,
+    });
     const mapped = mapSettingsDtoToModel(payload);
     // Cache the last known-good backend settings for offline/local-first use.
-    saveAppSettings(mapped);
+    if (options.userId) {
+      saveAppSettings(options.userId, mapped);
+    }
     return mapped;
   } catch (error) {
+    if (options.optional && error instanceof HttpError && [401, 403, 404].includes(error.status)) {
+      return options.userId ? loadAppSettings(options.userId) : defaultAppSettings;
+    }
+
     if (error instanceof HttpError && error.status === 404) {
       // If the endpoint isn't implemented yet, keep a predictable fallback.
       throw error;
@@ -464,8 +526,39 @@ export async function getAppSettingsFromApi(): Promise<AppSettings> {
 export async function saveAppSettingsToApi(settings: AppSettings): Promise<void> {
   const dto = mapSettingsModelToDto(settings);
   await postJson<unknown, unknown>(apiEndpoints.settingsApi, dto);
-  // Cache only after a successful backend write.
-  saveAppSettings(settings);
+}
+
+export async function getUserSettingsBootstrapFromApi(user: AppUser): Promise<UserSettingsBootstrap> {
+  if (user.role !== 'USER') {
+    return {
+      settings: defaultAppSettings,
+      settingsCompleted: true,
+    };
+  }
+
+  try {
+    const payload = await getJson<unknown>(apiEndpoints.settingsApi, {
+      skipUnauthorizedRedirect: true,
+    });
+    const settings = mapSettingsDtoToModel(payload);
+    const settingsCompleted = resolveSettingsCompleted(payload, settings, user.settingsCompleted);
+    saveAppSettings(user.id, settings);
+
+    return {
+      settings,
+      settingsCompleted,
+    };
+  } catch (error) {
+    if (error instanceof HttpError && [404, 403].includes(error.status)) {
+      resetAppSettings(user.id);
+      return {
+        settings: defaultAppSettings,
+        settingsCompleted: false,
+      };
+    }
+
+    throw error;
+  }
 }
 
 let autoThemeCleanup: (() => void) | null = null;

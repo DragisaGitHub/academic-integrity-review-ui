@@ -25,7 +25,7 @@ const suggestedQuestions = [
 
 
 export function ReviewNotes() {
-  const { id } = useParams<{ id: string }>();
+  const { documentId } = useParams<{ documentId: string }>();
   const navigate = useNavigate();
 
   const [document, setDocument] = useState<Document | null>(null);
@@ -47,7 +47,7 @@ export function ReviewNotes() {
   }, [isDirty]);
 
   useEffect(() => {
-    if (!id) {
+    if (!documentId) {
       setDocument(null);
       setLoadState('not-found');
       return;
@@ -69,7 +69,7 @@ export function ReviewNotes() {
 
     (async () => {
       try {
-        const apiDocument = await getDocumentByIdFromApi(id);
+        const apiDocument = await getDocumentByIdFromApi(documentId);
         if (cancelled) return;
 
         if (!apiDocument) {
@@ -81,7 +81,7 @@ export function ReviewNotes() {
         setDocument(apiDocument);
         setLoadState('loaded');
 
-        const reviewNote = await getReviewNoteByDocumentIdFromApi(id);
+        const reviewNote = await getReviewNoteByDocumentIdFromApi(documentId);
         if (cancelled) return;
 
         // 404 => no review note yet; keep defaults and page usable.
@@ -90,6 +90,16 @@ export function ReviewNotes() {
         // Don't clobber in-progress typing.
         if (isDirtyRef.current) return;
 
+        setDocument((previous) =>
+          previous
+            ? {
+                ...previous,
+                title: reviewNote.document.title || previous.title,
+                studentName: reviewNote.document.studentName || previous.studentName,
+                course: reviewNote.document.course || previous.course,
+              }
+            : previous,
+        );
         setNotes(reviewNote.notes);
         setChecklist(reviewNote.checklist);
         setDecision(reviewNote.finalDecision);
@@ -103,13 +113,13 @@ export function ReviewNotes() {
     return () => {
       cancelled = true;
     };
-  }, [id]);
+  }, [documentId]);
 
   const handleSave = async () => {
-    if (!id) return;
+    if (!documentId) return;
 
     try {
-      await saveReviewNoteForDocumentToApi(id, {
+      await saveReviewNoteForDocumentToApi(documentId, {
         notes,
         checklist,
         finalDecision: decision,
@@ -124,7 +134,7 @@ export function ReviewNotes() {
     }
   };
 
-  if (!id || loadState === 'loading') {
+  if (!documentId || loadState === 'loading') {
     return (
       <div className="max-w-5xl mx-auto space-y-6">
         <div>
@@ -251,7 +261,7 @@ export function ReviewNotes() {
                 className="mb-4"
               />
               <p className="text-xs text-slate-600">
-                These notes are private and visible only to you.
+                These notes are stored against this document&apos;s review record.
               </p>
             </CardContent>
           </Card>

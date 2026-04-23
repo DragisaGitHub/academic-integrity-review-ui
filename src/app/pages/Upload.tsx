@@ -9,6 +9,7 @@ import { Switch } from '../components/ui/switch';
 import { Progress } from '../components/ui/progress';
 import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
+import { getAnalysisDetailRoute } from '../routeAccess';
 import { uploadDocumentToApi } from '../services/documents';
 import { createAnalysisToApi, getAnalysisStatusFromApi, saveAnalysisNotesForAnalysisToApi } from '../services/analyses';
 
@@ -163,7 +164,7 @@ export function Upload() {
               setCurrentStep(analysisSteps.length - 1);
               setProgress(100);
               await wait(500, abortController.signal);
-              navigate(`/analysis/${documentId}`);
+              navigate(getAnalysisDetailRoute(documentId));
               return;
             case 'failed':
               toast.error(statusResult.errorMessage ?? 'Analysis failed. Please try again.');
