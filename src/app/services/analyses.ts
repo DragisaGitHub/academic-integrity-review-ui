@@ -1,6 +1,7 @@
 import type {
   AnalysisDetails,
   AnalysisSummary,
+  AnalysisTextSegment,
   DocumentReference,
   Finding,
   FindingCategory,
@@ -163,21 +164,19 @@ function mapAnalysisDtoToDetails(payload: unknown, fallbackDocumentId: string): 
   if (!isRecord(payload)) return null;
 
   // Audited backend contract for GET /api/analyses/document/{documentId}:
-  // { id:number, document:{ id, title, studentName, course }, analysisDate:string|null, fullText:string|null, createdAt:string, updatedAt:string }
+  // { id:number, document:{ id, title, studentName, course }, analysisDate:string|null, createdAt:string, updatedAt:string }
   const idValue = asNumber(payload.id);
   if (idValue === undefined) return null;
 
   const document = mapDocumentReference(payload.document, fallbackDocumentId);
   if (!document) return null;
   const analysisDate = asString(payload.analysisDate);
-  const fullText = asString(payload.fullText) ?? '';
 
   return {
     id: String(idValue),
     document,
     analysisDate: analysisDate ?? undefined,
     summary: emptySummary(),
-    fullText,
   };
 }
 
@@ -199,6 +198,9 @@ type FindingDto = Record<string, unknown>;
 function mapFindingDto(dto: FindingDto, params: { documentId: string; analysisId: string; index: number }): Finding {
   const idValue = asNumber(dto.id);
   const id = idValue === undefined ? `${params.analysisId}-${params.index}` : String(idValue);
+  const segmentIndex = asNumber(dto.segmentIndex);
+  const excerptStartOffset = asNumber(dto.excerptStartOffset);
+  const excerptEndOffset = asNumber(dto.excerptEndOffset);
 
   return {
     id,
@@ -208,6 +210,9 @@ function mapFindingDto(dto: FindingDto, params: { documentId: string; analysisId
     title: asString(dto.title) ?? 'Finding',
     description: asString(dto.explanation) ?? '',
     excerpt: asString(dto.excerpt) ?? '',
+    segmentIndex: segmentIndex !== undefined && segmentIndex >= 0 ? segmentIndex : undefined,
+    excerptStartOffset: excerptStartOffset !== undefined && excerptStartOffset >= 0 ? excerptStartOffset : undefined,
+    excerptEndOffset: excerptEndOffset !== undefined && excerptEndOffset >= 0 ? excerptEndOffset : undefined,
     paragraphLocation: parseParagraphLocation(dto.paragraphLocation),
     recommendation: asString(dto.suggestedAction) ?? '',
     followUpQuestion: undefined,
@@ -215,6 +220,63 @@ function mapFindingDto(dto: FindingDto, params: { documentId: string; analysisId
     professorNotes: asString(dto.professorNotes) ?? '',
     flaggedForFollowUp: asBoolean(dto.flaggedForFollowUp) ?? false,
   };
+}
+
+function mapTextSegmentDto(payload: unknown, index: number): AnalysisTextSegment | null {
+  if (typeof payload === 'string') {
+    return {
+      segmentIndex: index,
+      text: payload,
+    };
+  }
+
+  if (!isRecord(payload)) {
+    return null;
+  }
+
+  const segmentIndex = asNumber(payload.segmentIndex) ?? asNumber(payload.index) ?? index;
+  const text = asString(payload.text) ?? asString(payload.content) ?? asString(payload.segmentText);
+  if (segmentIndex < 0 || !text) {
+    return null;
+  }
+
+  return {
+    segmentIndex,
+    text,
+  };
+}
+
+function parseSegmentPayload(payload: unknown): AnalysisTextSegment[] {
+  const items = Array.isArray(payload)
+    ? payload
+    : isRecord(payload) && Array.isArray(payload.segments)
+      ? payload.segments
+      : [];
+
+  return items
+    .map((item, index) => mapTextSegmentDto(item, index))
+    .filter((item): item is AnalysisTextSegment => item !== null)
+    .sort((left, right) => left.segmentIndex - right.segmentIndex);
+}
+
+export async function getAnalysisTextSegmentsFromApi(params: {
+  analysisId: string;
+  from: number;
+  to: number;
+  signal?: AbortSignal;
+}): Promise<AnalysisTextSegment[]> {
+  if (!params.analysisId || params.from < 0 || params.to < params.from) return [];
+
+  try {
+    const payload = await getJson<unknown>(apiEndpoints.analysisTextSegments(params.analysisId, params.from, params.to), {
+      signal: params.signal,
+    });
+
+    return parseSegmentPayload(payload);
+  } catch (error) {
+    if (error instanceof HttpError && error.status === 404) return [];
+    throw error;
+  }
 }
 
 export interface UpdateFindingRequest {
@@ -362,9 +424,13 @@ export interface AnalysisNotesResult {
   notes: string;
 }
 
+function emptyAnalysisNotesResult(): AnalysisNotesResult {
+  return { notes: '' };
+}
+
 export async function getAnalysisNotesFromApi(analysisId: string): Promise<AnalysisNotesResult> {
   if (!analysisId) {
-    return { notes: '' };
+    return emptyAnalysisNotesResult();
   }
 
   try {
@@ -375,15 +441,16 @@ export async function getAnalysisNotesFromApi(analysisId: string): Promise<Analy
     }
 
     if (!isRecord(payload)) {
-      return { notes: '' };
+      return emptyAnalysisNotesResult();
     }
 
     return {
       notes: asString(payload.notes) ?? asString(payload.content) ?? asString(payload.value) ?? '',
     };
   } catch (error) {
+    // Missing analysis-scoped notes are a normal empty state, not an error.
     if (error instanceof HttpError && error.status === 404) {
-      return { notes: '' };
+      return emptyAnalysisNotesResult();
     }
 
     throw error;

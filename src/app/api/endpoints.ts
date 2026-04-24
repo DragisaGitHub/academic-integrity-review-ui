@@ -28,6 +28,8 @@ export const apiEndpoints = {
   analysisStatus: (analysisId: string) => `/api/analyses/${encodeURIComponent(analysisId)}/status`,
   analysisRetry: (analysisId: string) => `/api/analyses/${encodeURIComponent(analysisId)}/retry`,
   analysisNotes: (analysisId: string) => `/api/analyses/${encodeURIComponent(analysisId)}/notes`,
+  analysisTextSegments: (analysisId: string, from: number, to: number) =>
+    `/api/analyses/${encodeURIComponent(analysisId)}/text/segments?from=${encodeURIComponent(String(from))}&to=${encodeURIComponent(String(to))}`,
   analysisFindings: (analysisId: string) => `/api/analyses/${encodeURIComponent(analysisId)}/findings`,
   analysisFinding: (analysisId: string, findingId: string) =>
     `/api/analyses/${encodeURIComponent(analysisId)}/findings/${encodeURIComponent(findingId)}`,

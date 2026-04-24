@@ -26,11 +26,12 @@ import {
   getAnalysisByDocumentIdFromApi,
   getAnalysisNotesFromApi,
   getAnalysisStatusFromApi,
+  getAnalysisTextSegmentsFromApi,
   getFindingsByAnalysisIdFromApi,
   retryAnalysisFromApi,
   updateFindingForAnalysisFromApi,
 } from '../services/analyses';
-import type { AnalysisDetails, Document, Finding, FindingCategory, FindingSeverity } from '../types';
+import type { AnalysisDetails, AnalysisTextSegment, Document, Finding, FindingCategory, FindingSeverity } from '../types';
 import { formatDateOrDash } from '../utils/dateFormat';
 import {
   analysisStatusBadgeClass,
@@ -69,8 +70,142 @@ const severityLabels: Record<FindingSeverity, string> = {
   critical: 'Critical',
 };
 
+const INITIAL_SEGMENT_WINDOW_SIZE = 24;
+
+type ExcerptHighlightMatch = 'offset-local' | 'excerpt-search' | 'offset-approximate';
+
+type ExcerptHighlight = {
+  start: number;
+  end: number;
+  match: ExcerptHighlightMatch;
+  exact: boolean;
+};
+
 function formatParagraphLocation(location: number): string {
   return location >= 0 ? String(location) : 'N/A';
+}
+
+function getFindingSegmentIndex(finding: Finding): number | null {
+  if (typeof finding.segmentIndex === 'number' && finding.segmentIndex >= 0) return finding.segmentIndex;
+  if (finding.paragraphLocation >= 0) return finding.paragraphLocation;
+  return null;
+}
+
+function getFindingLocationLabel(finding: Finding): string {
+  const segmentIndex = getFindingSegmentIndex(finding);
+  if (segmentIndex !== null) {
+    return `Segment ${segmentIndex}`;
+  }
+
+  return `Paragraph ${formatParagraphLocation(finding.paragraphLocation)}`;
+}
+
+function getSegmentRangeForPage(findings: Finding[]): { from: number; to: number } {
+  const segmentIndexes = findings
+    .map((finding) => getFindingSegmentIndex(finding))
+    .filter((segmentIndex): segmentIndex is number => segmentIndex !== null)
+    .sort((left, right) => left - right);
+
+  if (segmentIndexes.length === 0) {
+    return {
+      from: 0,
+      to: INITIAL_SEGMENT_WINDOW_SIZE - 1,
+    };
+  }
+
+  return {
+    from: 0,
+    to: Math.max(segmentIndexes[segmentIndexes.length - 1], INITIAL_SEGMENT_WINDOW_SIZE - 1),
+  };
+}
+
+function normalizeExcerptValue(value: string): string {
+  return value.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function findExcerptInSegment(segmentText: string, excerpt: string): { start: number; end: number } | null {
+  const trimmedExcerpt = excerpt.trim();
+  if (!trimmedExcerpt) return null;
+
+  const directIndex = segmentText.indexOf(trimmedExcerpt);
+  if (directIndex >= 0) {
+    return {
+      start: directIndex,
+      end: directIndex + trimmedExcerpt.length,
+    };
+  }
+
+  const lowerSegmentText = segmentText.toLowerCase();
+  const lowerExcerpt = trimmedExcerpt.toLowerCase();
+  const caseInsensitiveIndex = lowerSegmentText.indexOf(lowerExcerpt);
+  if (caseInsensitiveIndex >= 0) {
+    return {
+      start: caseInsensitiveIndex,
+      end: caseInsensitiveIndex + lowerExcerpt.length,
+    };
+  }
+
+  return null;
+}
+
+function getExcerptHighlight(finding: Finding, segmentText: string): ExcerptHighlight | null {
+  if (!segmentText) return null;
+
+  const excerpt = finding.excerpt.trim();
+  const normalizedExcerpt = normalizeExcerptValue(excerpt);
+  const hasOffsets = typeof finding.excerptStartOffset === 'number' && typeof finding.excerptEndOffset === 'number';
+
+  if (hasOffsets) {
+    const rawStart = finding.excerptStartOffset as number;
+    const rawEnd = finding.excerptEndOffset as number;
+    const offsetsAreInBounds = rawStart >= 0 && rawEnd > rawStart && rawEnd <= segmentText.length;
+
+    if (offsetsAreInBounds) {
+      const offsetSlice = segmentText.slice(rawStart, rawEnd);
+      const normalizedOffsetSlice = normalizeExcerptValue(offsetSlice);
+      const offsetMatchesExcerpt = !normalizedExcerpt
+        || normalizedOffsetSlice.includes(normalizedExcerpt)
+        || normalizedExcerpt.includes(normalizedOffsetSlice);
+
+      if (offsetMatchesExcerpt) {
+        return {
+          start: rawStart,
+          end: rawEnd,
+          match: 'offset-local',
+          exact: true,
+        };
+      }
+    }
+  }
+
+  const excerptMatch = excerpt ? findExcerptInSegment(segmentText, excerpt) : null;
+  if (excerptMatch) {
+    return {
+      ...excerptMatch,
+      match: 'excerpt-search',
+      exact: true,
+    };
+  }
+
+  if (!hasOffsets) {
+    return null;
+  }
+
+  const rawStart = finding.excerptStartOffset as number;
+  const rawEnd = finding.excerptEndOffset as number;
+  const start = Math.max(0, Math.min(rawStart, segmentText.length));
+  const end = Math.max(start, Math.min(rawEnd, segmentText.length));
+
+  if (start === end) {
+    return null;
+  }
+
+  return {
+    start,
+    end,
+    match: 'offset-approximate',
+    exact: false,
+  };
 }
 
 function wait(ms: number, signal?: AbortSignal): Promise<void> {
@@ -97,11 +232,17 @@ export function Analysis() {
   const { documentId } = useParams<{ documentId: string }>();
   const navigate = useNavigate();
   const retryPendingRef = useRef(false);
+  const textSegmentRefs = useRef<Record<number, HTMLDivElement | null>>({});
+  const excerptTargetRef = useRef<HTMLSpanElement | null>(null);
 
   const [selectedFinding, setSelectedFinding] = useState<Finding | null>(null);
-  const [highlightedParagraph, setHighlightedParagraph] = useState<number | null>(null);
+  const [textHighlightedFindingId, setTextHighlightedFindingId] = useState<string | null>(null);
+  const [highlightedSegmentIndex, setHighlightedSegmentIndex] = useState<number | null>(null);
+  const [pendingScrollFindingId, setPendingScrollFindingId] = useState<string | null>(null);
   const [document, setDocument] = useState<Document | null>(null);
   const [analysis, setAnalysis] = useState<AnalysisViewModel | null>(null);
+  const [textSegments, setTextSegments] = useState<AnalysisTextSegment[]>([]);
+  const [textLoadError, setTextLoadError] = useState('');
   const [analysisErrorMessage, setAnalysisErrorMessage] = useState('');
   const [analysisIdOverride, setAnalysisIdOverride] = useState<string | null>(null);
   const [retryTrigger, setRetryTrigger] = useState(0);
@@ -115,6 +256,70 @@ export function Analysis() {
   useEffect(() => {
     setNotesDraft(selectedFinding?.professorNotes ?? '');
   }, [selectedFinding]);
+
+  useEffect(() => {
+    if (!pendingScrollFindingId) return;
+
+    const exactTargetNode = excerptTargetRef.current;
+    if (exactTargetNode) {
+      const animationFrameId = window.requestAnimationFrame(() => {
+        exactTargetNode.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+        setPendingScrollFindingId((current) => (current === pendingScrollFindingId ? null : current));
+      });
+
+      return () => window.cancelAnimationFrame(animationFrameId);
+    }
+
+    if (highlightedSegmentIndex === null) return;
+
+    const fallbackNode = textSegmentRefs.current[highlightedSegmentIndex];
+    if (!fallbackNode) return;
+
+    const animationFrameId = window.requestAnimationFrame(() => {
+      fallbackNode.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+      setPendingScrollFindingId((current) => (current === pendingScrollFindingId ? null : current));
+    });
+
+    return () => window.cancelAnimationFrame(animationFrameId);
+  }, [highlightedSegmentIndex, pendingScrollFindingId, textSegments]);
+
+  function openFindingDetail(finding: Finding): void {
+    setSelectedFinding(finding);
+  }
+
+  function highlightFindingInDocument(finding: Finding): void {
+    setTextHighlightedFindingId(finding.id);
+    setHighlightedSegmentIndex(getFindingSegmentIndex(finding));
+    setPendingScrollFindingId(finding.id);
+  }
+
+  function handleShowFindingInText(): void {
+    if (!selectedFinding) return;
+
+    highlightFindingInDocument(selectedFinding);
+    setSelectedFinding(null);
+
+    const activeSegmentIndex = getFindingSegmentIndex(selectedFinding);
+    if (activeSegmentIndex === null) {
+      toast.error('This finding does not include a segment location yet.');
+      return;
+    }
+
+    const activeSegment = textSegments.find((segment) => segment.segmentIndex === activeSegmentIndex);
+    const highlight = activeSegment ? getExcerptHighlight(selectedFinding, activeSegment.text) : null;
+
+    if (highlight?.exact) {
+      toast.success('Highlighted the referenced excerpt in the document.');
+      return;
+    }
+
+    if (highlight) {
+      toast('Focused the related text segment, but the excerpt highlight is approximate.');
+      return;
+    }
+
+    toast('Focused the related text segment. Exact highlighting depends on segment-relative offsets or a uniquely matching excerpt.');
+  }
 
   function applyUpdatedFinding(updatedFinding: Finding): void {
     setAnalysis((previous) => {
@@ -249,7 +454,11 @@ export function Analysis() {
     setAnalysis(null);
     setAnalysisErrorMessage('');
     setSelectedFinding(null);
-    setHighlightedParagraph(null);
+    setTextHighlightedFindingId(null);
+    setHighlightedSegmentIndex(null);
+    setPendingScrollFindingId(null);
+    setTextSegments([]);
+    setTextLoadError('');
 
     let cancelled = false;
     const abortController = new AbortController();
@@ -315,6 +524,22 @@ export function Analysis() {
           }),
         ]);
         if (cancelled) return;
+
+        const segmentRange = getSegmentRangeForPage(findings);
+
+        const segments = await getAnalysisTextSegmentsFromApi({
+          analysisId: analysisDetails.id,
+          from: segmentRange.from,
+          to: segmentRange.to,
+          signal: abortController.signal,
+        }).catch((error: unknown) => {
+          console.error('Failed to load analysis text segments', error);
+          setTextLoadError('Document text could not be loaded from the segment endpoint.');
+          return [];
+        });
+        if (cancelled) return;
+
+        setTextSegments(segments);
 
         setAnalysis({
           document: {
@@ -483,22 +708,36 @@ export function Analysis() {
     );
   }
 
-  const paragraphs = analysis.details.fullText ? analysis.details.fullText.split('\n\n') : [];
-
-  function getFindingsForParagraph(index: number): Finding[] {
-    return analysis.findings.filter((finding) => finding.paragraphLocation === index);
+  function getFindingsForSegment(index: number): Finding[] {
+    return analysis.findings.filter((finding) => getFindingSegmentIndex(finding) === index);
   }
 
   function getCategoryFindings(category: FindingCategory): Finding[] {
     return analysis.findings.filter((finding) => finding.category === category);
   }
 
-  function renderParagraphWithHighlights(text: string, index: number) {
-    const findings = getFindingsForParagraph(index);
-    const isHighlighted = highlightedParagraph === index;
+  function renderSegmentText(segment: AnalysisTextSegment) {
+    const findings = getFindingsForSegment(segment.segmentIndex);
+    const textHighlightedFinding = textHighlightedFindingId
+      ? analysis.findings.find((finding) => finding.id === textHighlightedFindingId) ?? null
+      : null;
+    const selectedExcerpt = textHighlightedFinding && getFindingSegmentIndex(textHighlightedFinding) === segment.segmentIndex
+      ? getExcerptHighlight(textHighlightedFinding, segment.text)
+      : null;
+    const hasStrongExcerptHighlight = Boolean(selectedExcerpt);
+    const hasSegmentFocus = Boolean(textHighlightedFinding) && highlightedSegmentIndex === segment.segmentIndex;
 
     if (findings.length === 0) {
-      return <p className="mb-4 text-slate-700 leading-relaxed">{text}</p>;
+      return (
+        <div
+          ref={(node) => {
+            textSegmentRefs.current[segment.segmentIndex] = node;
+          }}
+          className={`mb-4 rounded border border-transparent p-4 transition-all ${hasSegmentFocus && !hasStrongExcerptHighlight ? 'ring-2 ring-slate-300' : ''}`}
+        >
+          <p className="text-slate-700 leading-relaxed whitespace-pre-wrap">{segment.text}</p>
+        </div>
+      );
     }
 
     const severityLevel = findings.some((finding) => finding.severity === 'critical')
@@ -507,21 +746,41 @@ export function Analysis() {
         ? 'warning'
         : 'info';
 
-    const highlightClass = severityLevel === 'critical'
-      ? 'bg-red-50 border-l-4 border-red-500'
+    const segmentClass = severityLevel === 'critical'
+      ? 'border-l-2 border-red-300'
       : severityLevel === 'warning'
-        ? 'bg-amber-50 border-l-4 border-amber-500'
-        : 'bg-blue-50 border-l-4 border-blue-500';
+        ? 'border-l-2 border-amber-300'
+        : 'border-l-2 border-blue-300';
 
     return (
       <div
-        className={`mb-4 cursor-pointer rounded p-4 transition-all ${highlightClass} ${isHighlighted ? 'ring-2 ring-slate-900' : ''}`}
+        ref={(node) => {
+          textSegmentRefs.current[segment.segmentIndex] = node;
+        }}
+        className={`mb-4 cursor-pointer rounded border border-slate-200 bg-white p-4 transition-all ${segmentClass} ${hasSegmentFocus && !hasStrongExcerptHighlight ? 'ring-2 ring-slate-300 shadow-sm' : ''}`}
         onClick={() => {
-          setHighlightedParagraph(index);
           setSelectedFinding(findings[0]);
         }}
       >
-        <p className="text-slate-700 leading-relaxed">{text}</p>
+        {hasStrongExcerptHighlight ? (
+          <div className="mb-3 inline-flex rounded-full bg-yellow-300 px-2 py-1 text-xs font-semibold uppercase tracking-wide text-slate-950 animate-pulse">
+            {selectedExcerpt?.exact ? 'Problematic excerpt' : 'Approximate excerpt'}
+          </div>
+        ) : null}
+        <p className="text-slate-700 leading-relaxed whitespace-pre-wrap">
+          {selectedExcerpt ? segment.text.slice(0, selectedExcerpt.start) : null}
+          {selectedExcerpt ? (
+            <mark
+              ref={(node) => {
+                excerptTargetRef.current = node;
+              }}
+              className="rounded bg-yellow-300 px-1 py-0.5 font-semibold text-slate-950 shadow-[0_0_0_4px_rgba(250,204,21,0.55)]"
+            >
+              {segment.text.slice(selectedExcerpt.start, selectedExcerpt.end)}
+            </mark>
+          ) : null}
+          {selectedExcerpt ? segment.text.slice(selectedExcerpt.end) : segment.text}
+        </p>
         <div className="mt-3 flex gap-2">
           {findings.map((finding) => (
             <Badge key={finding.id} variant="outline" className="text-xs">
@@ -566,10 +825,16 @@ export function Analysis() {
               </div>
             </CardHeader>
             <CardContent className="max-h-[800px] overflow-y-auto pt-6">
-              {paragraphs.length > 0 ? (
-                paragraphs.map((paragraph, index) => <div key={`${index}-${paragraph.slice(0, 12)}`}>{renderParagraphWithHighlights(paragraph, index)}</div>)
+              {textSegments.length > 0 ? (
+                textSegments.map((segment) => (
+                  <div key={`${segment.segmentIndex}-${segment.text.slice(0, 12)}`}>
+                    {renderSegmentText(segment)}
+                  </div>
+                ))
               ) : (
-                <p className="text-sm text-slate-600">The backend did not return extracted document text for this analysis.</p>
+                <p className="text-sm text-slate-600">
+                  {textLoadError || 'The backend did not return extracted document text for this analysis.'}
+                </p>
               )}
             </CardContent>
           </Card>
@@ -601,14 +866,14 @@ export function Analysis() {
 
                         <TabsContent value="overview" className="mt-4 space-y-4">
                           {analysis.findings.map((finding) => (
-                            <FindingCard key={finding.id} finding={finding} onClick={() => setSelectedFinding(finding)} />
+                            <FindingCard key={finding.id} finding={finding} onClick={() => openFindingDetail(finding)} />
                           ))}
                         </TabsContent>
 
                         <TabsContent value="citations" className="mt-4 space-y-4">
                           {getCategoryFindings('citation').length > 0 ? (
                             getCategoryFindings('citation').map((finding) => (
-                              <FindingCard key={finding.id} finding={finding} onClick={() => setSelectedFinding(finding)} />
+                              <FindingCard key={finding.id} finding={finding} onClick={() => openFindingDetail(finding)} />
                             ))
                           ) : (
                             <p className="text-sm text-slate-600">No citation issues found.</p>
@@ -620,7 +885,7 @@ export function Analysis() {
                                 <p className="text-sm text-slate-900">Reference Issues</p>
                               </div>
                               {getCategoryFindings('reference').map((finding) => (
-                                <FindingCard key={finding.id} finding={finding} onClick={() => setSelectedFinding(finding)} />
+                                <FindingCard key={finding.id} finding={finding} onClick={() => openFindingDetail(finding)} />
                               ))}
                             </>
                           ) : null}
@@ -629,7 +894,7 @@ export function Analysis() {
                         <TabsContent value="style" className="mt-4 space-y-4">
                           {getCategoryFindings('style').length > 0 ? (
                             getCategoryFindings('style').map((finding) => (
-                              <FindingCard key={finding.id} finding={finding} onClick={() => setSelectedFinding(finding)} />
+                              <FindingCard key={finding.id} finding={finding} onClick={() => openFindingDetail(finding)} />
                             ))
                           ) : (
                             <p className="text-sm text-slate-600">No style issues found.</p>
@@ -641,7 +906,7 @@ export function Analysis() {
                                 <p className="text-sm text-slate-900">AI Review Notes</p>
                               </div>
                               {getCategoryFindings('ai').map((finding) => (
-                                <FindingCard key={finding.id} finding={finding} onClick={() => setSelectedFinding(finding)} />
+                                <FindingCard key={finding.id} finding={finding} onClick={() => openFindingDetail(finding)} />
                               ))}
                             </>
                           ) : null}
@@ -659,7 +924,7 @@ export function Analysis() {
                         {analysis.notes}
                       </div>
                     ) : (
-                      <p className="text-sm text-slate-600">No analysis notes were returned for this analysis.</p>
+                      <p className="text-sm text-slate-600">No analysis notes yet.</p>
                     )}
                   </TabsContent>
                 </div>
@@ -698,7 +963,7 @@ export function Analysis() {
               </Badge>
             </div>
             <DialogDescription className="text-slate-600">
-              {categoryLabels[selectedFinding?.category || 'citation']} | Paragraph {formatParagraphLocation(selectedFinding?.paragraphLocation ?? -1)}
+              {selectedFinding ? `${categoryLabels[selectedFinding.category]} | ${getFindingLocationLabel(selectedFinding)}` : ''}
             </DialogDescription>
           </DialogHeader>
 
@@ -718,6 +983,17 @@ export function Analysis() {
             <div>
               <p className="mb-2 text-sm text-slate-700">Recommendation:</p>
               <p className="text-sm text-slate-600">{selectedFinding?.recommendation || 'No recommendation was returned for this finding.'}</p>
+            </div>
+
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+              <p className="text-sm font-medium text-slate-900">Document navigation</p>
+              <p className="mt-1 text-sm text-slate-600">
+                Jump to the related segment and highlight the referenced excerpt directly in the document panel.
+              </p>
+              <Button className="mt-3" onClick={() => handleShowFindingInText()}>
+                <ExternalLink className="mr-2 h-4 w-4" />
+                Show In Document
+              </Button>
             </div>
 
             <div>
@@ -776,7 +1052,12 @@ function AnalysisHeader({ document, children }: { document: Document; children?:
   return (
     <div className="flex items-start justify-between gap-4">
       <div>
-        <h2 className="mb-2 text-slate-900">{document.title}</h2>
+        <div className="mb-2 flex items-center gap-3">
+          <h2 className="text-slate-900">{document.title}</h2>
+          <Badge variant="outline" className={reviewPriorityBadgeClass[document.reviewPriority]}>
+            {reviewPriorityLabelAnalysis[document.reviewPriority]}
+          </Badge>
+        </div>
         <div className="flex items-center gap-4 text-sm text-slate-600">
           <span>{document.studentName}</span>
           <span>|</span>
@@ -788,9 +1069,6 @@ function AnalysisHeader({ document, children }: { document: Document; children?:
 
       <div className="flex items-center gap-3">
         {children}
-        <Badge variant="outline" className={reviewPriorityBadgeClass[document.reviewPriority]}>
-          {reviewPriorityLabelAnalysis[document.reviewPriority]}
-        </Badge>
       </div>
     </div>
   );
@@ -827,7 +1105,7 @@ function FindingCard({ finding, onClick }: { finding: Finding; onClick: () => vo
       </div>
       <p className="mb-3 text-xs text-slate-600">{finding.description}</p>
       <div className="flex items-center justify-between">
-        <span className="text-xs text-slate-500">Paragraph {formatParagraphLocation(finding.paragraphLocation)}</span>
+        <span className="text-xs text-slate-500">{getFindingLocationLabel(finding)}</span>
         <ExternalLink className="h-3 w-3 text-slate-400" />
       </div>
     </div>

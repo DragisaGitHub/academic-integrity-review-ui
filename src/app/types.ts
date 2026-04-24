@@ -108,6 +108,9 @@ export interface Finding {
   title: string;
   description: string;
   excerpt: string;
+  segmentIndex?: number;
+  excerptStartOffset?: number;
+  excerptEndOffset?: number;
   paragraphLocation: number;
   recommendation: string;
   followUpQuestion?: string;
@@ -134,13 +137,16 @@ export interface AnalysisDetails {
   document: DocumentReference;
   analysisDate?: string;
   summary: AnalysisSummary;
-  fullText: string;
 }
 
 export interface DocumentAnalysis extends Document {
   findings: Finding[];
   summary: AnalysisSummary;
-  fullText: string;
+}
+
+export interface AnalysisTextSegment {
+  segmentIndex: number;
+  text: string;
 }
 
 export interface KPIData {
